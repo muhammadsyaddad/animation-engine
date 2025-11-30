@@ -1,0 +1,17 @@
+{
+  "languages": {
+    "Python": {
+      "language_servers": ["pyright"] // only pyright, exclude basedpyright
+    }
+  },
+  "lsp": {
+    "basedpyright": {
+      "settings": {
+        "reportMissingImports": "none",
+        "analysis": {
+          "disabled": true
+        }
+      }
+    }
+  }
+}
