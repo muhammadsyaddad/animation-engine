@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 270" width="480" height="270">
+  <defs>
+    <linearGradient id="bg_single" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#16213e;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="singleBar1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#06b6d4;stop-opacity:0.9"/>
+      <stop offset="100%" style="stop-color:#22d3ee;stop-opacity:0.7"/>
+    </linearGradient>
+  </defs>
+  <rect width="480" height="270" fill="url(#bg_single)"/>
+  <!-- Title -->
+  <text x="240" y="25" font-family="system-ui, sans-serif" font-size="14" fill="#ffffff" text-anchor="middle" font-weight="600">Sales by Region</text>
+  <!-- Bars with values -->
+  <text x="100" y="60" font-family="system-ui, sans-serif" font-size="11" fill="#94a3b8" text-anchor="end">N. America</text>
+  <rect x="110" y="48" width="300" height="22" rx="4" fill="url(#singleBar1)"/>
+  <text x="420" y="63" font-family="system-ui, sans-serif" font-size="10" fill="#22d3ee">$4.5M</text>
+
+  <text x="100" y="95" font-family="system-ui, sans-serif" font-size="11" fill="#94a3b8" text-anchor="end">Europe</text>
+  <rect x="110" y="83" width="253" height="22" rx="4" fill="url(#singleBar1)" opacity="0.9"/>
+  <text x="373" y="98" font-family="system-ui, sans-serif" font-size="10" fill="#22d3ee">$3.8M</text>
+
+  <text x="100" y="130" font-family="system-ui, sans-serif" font-size="11" fill="#94a3b8" text-anchor="end">Asia Pacific</text>
+  <rect x="110" y="118" width="213" height="22" rx="4" fill="url(#singleBar1)" opacity="0.85"/>
+  <text x="333" y="133" font-family="system-ui, sans-serif" font-size="10" fill="#22d3ee">$3.2M</text>
+
+  <text x="100" y="165" font-family="system-ui, sans-serif" font-size="11" fill="#94a3b8" text-anchor="end">Latin America</text>
+  <rect x="110" y="153" width="100" height="22" rx="4" fill="url(#singleBar1)" opacity="0.8"/>
+  <text x="220" y="168" font-family="system-ui, sans-serif" font-size="10" fill="#22d3ee">$1.5M</text>
+
+  <text x="100" y="200" font-family="system-ui, sans-serif" font-size="11" fill="#94a3b8" text-anchor="end">Middle East</text>
+  <rect x="110" y="188" width="60" height="22" rx="4" fill="url(#singleBar1)" opacity="0.75"/>
+  <text x="180" y="203" font-family="system-ui, sans-serif" font-size="10" fill="#22d3ee">$900K</text>
+
+  <text x="100" y="235" font-family="system-ui, sans-serif" font-size="11" fill="#94a3b8" text-anchor="end">Africa</text>
+  <rect x="110" y="223" width="40" height="22" rx="4" fill="url(#singleBar1)" opacity="0.7"/>
+  <text x="160" y="238" font-family="system-ui, sans-serif" font-size="10" fill="#22d3ee">$600K</text>
+  <!-- Play indicator -->
+  <circle cx="440" cy="40" r="16" fill="rgba(255,255,255,0.1)"/>
+  <polygon points="436,32 436,48 448,40" fill="rgba(255,255,255,0.5)"/>
+</svg>

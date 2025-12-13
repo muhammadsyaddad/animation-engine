@@ -5,6 +5,7 @@ from logging import getLogger
 from typing import AsyncGenerator, List, Optional
 import json
 import time
+import traceback
 from typing import AsyncGenerator
 
 from pydantic_core.core_schema import is_instance_schema
@@ -28,6 +29,22 @@ from db.session import get_db
 
 from api.routes.auth import get_current_user_optional
 from api.persistence.run_store import persist_run_created, persist_run_state, persist_run_completed, persist_run_failed, persist_artifact
+
+# Pipeline logging
+from api.pipeline_logger import (
+    PipelineLogger,
+    PipelineStep,
+    get_pipeline_logger,
+    log_pipeline_event,
+    cleanup_logger,
+)
+
+# Session context for animation pipeline persistence
+from api.session_context import (
+    get_session_context,
+    update_session_context,
+    AnimationContext,
+)
 
 logger = getLogger(__name__)
 
@@ -375,6 +392,8 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
 
         # Intent detection gate (decide whether to run animation pipeline or fallback to chat)
         should_animate = False
+        detected_chart_type = None  # Store detected chart type for later use
+
         if body.animate_data is True:
             should_animate = True
         elif body.animate_data is False:
@@ -382,8 +401,16 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
         else:
             try:
                 from agents.tools.intent_detection import detect_animation_intent  # type: ignore
-                intent = detect_animation_intent(body.message)
+                # Pass csv_path for data-driven inference; check session context if not in body
+                csv_path_for_intent = getattr(body, "csv_path", None)
+                if not csv_path_for_intent and body.session_id:
+                    # Try to get csv_path from session context
+                    _session_ctx = get_session_context(body.session_id)
+                    if _session_ctx and _session_ctx.has_dataset():
+                        csv_path_for_intent = _session_ctx.get_effective_csv_path()
+                intent = detect_animation_intent(body.message, csv_path=csv_path_for_intent)
                 should_animate = bool(getattr(intent, "animation_requested", False))
+                detected_chart_type = getattr(intent, "chart_type", "unknown")
             except Exception:
                 # Fallback heuristic if intent module unavailable
                 text = (body.message or "")
@@ -417,6 +444,17 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
             run = create_run(user_id=registry_user_id, session_id=session_id, message=msg)
             run_id = run.run_id
             set_state(run_id, RunState.STARTING, "Starting")
+
+            # Initialize pipeline logger for this run
+            plog = get_pipeline_logger(run_id=run_id, session_id=session_id, user_id=user_id)
+            plog.info(PipelineStep.RUN_STARTED, "Animation pipeline run started", {
+                "message_length": len(msg),
+                "has_csv_path": bool(getattr(body, "csv_path", None)),
+                "has_csv_dir": bool(getattr(body, "csv_dir", None)),
+                "chart_type_override": getattr(body, "chart_type", None),
+                "code_engine": getattr(body, "code_engine", None),
+                "code_model": getattr(body, "code_model", None),
+            })
             try:
                 agent_label = getattr(agent_id, "value", str(agent_id))
                 persist_run_created(run_id, db_user_id, session_id, agent_label, "STARTING", "Starting", {})
@@ -426,10 +464,27 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
             # Initial SSE event to signal animation pipeline activation (intent-based)
             try:
                 from agents.tools.intent_detection import detect_animation_intent  # type: ignore
-                _intent_info = detect_animation_intent(msg)
+                # Pass csv_path for smart data-driven inference; check session context if not in body
+                csv_path_for_intent = getattr(body, "csv_path", None)
+                if not csv_path_for_intent and session_id:
+                    # Try to get csv_path from session context
+                    _session_ctx_intent = get_session_context(session_id)
+                    if _session_ctx_intent and _session_ctx_intent.has_dataset():
+                        csv_path_for_intent = _session_ctx_intent.get_effective_csv_path()
+                _intent_info = detect_animation_intent(msg, csv_path=csv_path_for_intent)
                 _chart = getattr(_intent_info, "chart_type", "unknown")
                 _conf = getattr(_intent_info, "confidence", 0.0)
-                initial_msg = f"Animation intent detected (chart_type={_chart}, confidence={_conf:.2f}). Entering animation pipeline."
+                _data_analyzed = getattr(_intent_info, "data_analyzed", False)
+                _recommended = getattr(_intent_info, "recommended_charts", [])
+
+                if _data_analyzed and _recommended:
+                    initial_msg = (
+                        f"Animation intent detected (chart_type={_chart}, confidence={_conf:.2f}). "
+                        f"Data analysis completed. Top recommendations: {_recommended[:3]}. "
+                        f"Entering animation pipeline."
+                    )
+                else:
+                    initial_msg = f"Animation intent detected (chart_type={_chart}, confidence={_conf:.2f}). Entering animation pipeline."
             except Exception:
                 initial_msg = "Animation intent detected. Entering animation pipeline."
             init_payload = {
@@ -478,21 +533,243 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                 melted_dataset_path = None
                 dataset_melt_applied = False
                 raw_dataset_path = getattr(body, "csv_path", None)
+
+                # Session context: retrieve stored context if csv_path is missing
+                session_ctx = get_session_context(session_id) if session_id else None
+                context_from_session = False
+
+                if not raw_dataset_path and session_ctx and session_ctx.has_dataset():
+                    # Use csv_path from session context
+                    raw_dataset_path = session_ctx.get_effective_csv_path()
+                    context_from_session = True
+                    plog.info(PipelineStep.DATA_PREPROCESSING, "Using csv_path from session context", {
+                        "session_id": session_id,
+                        "csv_path": raw_dataset_path,
+                        "original_csv_path": session_ctx.original_csv_path,
+                    })
+                    ctx_payload = {
+                        "event": "RunContent",
+                        "content": f"📁 Using previously uploaded dataset: {session_ctx.original_csv_path or raw_dataset_path}",
+                        "created_at": int(time.time()),
+                        "run_id": run_id,
+                    }
+                    if session_id:
+                        ctx_payload["session_id"] = session_id
+                    yield f"data: {json.dumps(ctx_payload)}\n\n"
+
+                    # Also restore chart_type from context if not provided in body
+                    if not getattr(body, "chart_type", None) and session_ctx.chart_type:
+                        body.chart_type = session_ctx.chart_type
+                        plog.debug(PipelineStep.DATA_PREPROCESSING, "Restored chart_type from session context", {
+                            "chart_type": session_ctx.chart_type,
+                        })
+
+                    # Restore melted_dataset_path if available
+                    if session_ctx.melted_dataset_path:
+                        melted_dataset_path = session_ctx.melted_dataset_path
+                        dataset_melt_applied = True
+
+                    # Restore provisional_binding if available
+                    if session_ctx.data_binding:
+                        provisional_binding = session_ctx.data_binding
+
+                # Store context when we have a fresh csv_path from the request
+                if getattr(body, "csv_path", None) and session_id:
+                    update_session_context(
+                        session_id=session_id,
+                        csv_path=body.csv_path,
+                        original_csv_path=body.csv_path,
+                        chart_type=getattr(body, "chart_type", None),
+                        last_intent_message=msg,
+                    )
+                    plog.debug(PipelineStep.DATA_PREPROCESSING, "Stored csv_path in session context", {
+                        "session_id": session_id,
+                        "csv_path": body.csv_path,
+                    })
+
                 if raw_dataset_path and isinstance(raw_dataset_path, str):
                     try:
                         import os
                         import pandas as pd
-                        from api.services.data_modules import preprocess_dataset  # type: ignore
+                        from api.services.data_modules import preprocess_dataset, validate_for_animation, read_csv_smart, resolve_csv_path, detect_header_row  # type: ignore
+
+                        plog.info(PipelineStep.DATA_PREPROCESSING, "Starting data preprocessing", {
+                            "raw_dataset_path": raw_dataset_path,
+                        })
+
                         # Map /static path to filesystem if needed
-                        if raw_dataset_path.startswith("/static/"):
-                            artifacts_root = os.path.join(os.getcwd(), "artifacts")
-                            rel_inside = raw_dataset_path[len("/static/"):].lstrip("/")
-                            fs_candidate = os.path.join(artifacts_root, rel_inside)
-                            if os.path.exists(fs_candidate):
-                                raw_dataset_path = fs_candidate
+                        raw_dataset_path = resolve_csv_path(raw_dataset_path)
+                        plog.debug(PipelineStep.DATA_PREPROCESSING, "Resolved CSV path", {
+                            "fs_path": raw_dataset_path,
+                        })
                         if os.path.exists(raw_dataset_path):
-                            # Preview for structural detection
-                            df_preview = pd.read_csv(raw_dataset_path, nrows=100)
+                            # Detect header row for World Bank and similar formats
+                            header_row = detect_header_row(raw_dataset_path)
+                            plog.debug(PipelineStep.DATA_PREPROCESSING, "Detected header row", {
+                                "header_row": header_row,
+                            })
+
+                            # Preview for structural detection with robust CSV parsing
+                            try:
+                                # IMPORTANT: Use skip_blank_lines=False to match csv.reader row indexing
+                                # Use utf-8-sig encoding to handle BOM (Byte Order Mark) in World Bank CSVs
+                                df_preview = pd.read_csv(raw_dataset_path, nrows=100, header=header_row, skip_blank_lines=False, encoding='utf-8-sig')
+                            except pd.errors.ParserError as csv_err:
+                                # Try with different settings for malformed CSVs
+                                try:
+                                    df_preview = pd.read_csv(raw_dataset_path, nrows=100, on_bad_lines='skip', header=header_row, skip_blank_lines=False, encoding='utf-8-sig')
+                                    csv_warn_payload = {
+                                        "event": "RunContent",
+                                        "content": f"⚠️ Some rows in your CSV were malformed and skipped. Error: {csv_err}",
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        csv_warn_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(csv_warn_payload)}\n\n"
+                                except Exception:
+                                    # CSV is too malformed to parse
+                                    csv_error_msg = (
+                                        f"**CSV Parsing Failed**\n\n"
+                                        f"Your CSV file could not be parsed. Error: {csv_err}\n\n"
+                                        f"**How to fix:**\n"
+                                        f"  • Check that your file uses commas (,) as delimiters\n"
+                                        f"  • Ensure all rows have the same number of columns\n"
+                                        f"  • Wrap fields containing commas in quotes\n"
+                                        f"  • Re-export from Excel/Google Sheets as 'CSV UTF-8'"
+                                    )
+                                    csv_error_payload = {
+                                        "event": "RunContent",
+                                        "content": csv_error_msg,
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        csv_error_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(csv_error_payload)}\n\n"
+
+                                    error_payload = {
+                                        "event": "Error",
+                                        "content": "CSV parsing failed. Please fix the file format and try again.",
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        error_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(error_payload)}\n\n"
+
+                                    final_payload = {
+                                        "event": "RunResponse",
+                                        "run_id": run_id,
+                                        "state": "failed",
+                                        "created_at": int(time.time()),
+                                        "messages": [{"role": "assistant", "content": csv_error_msg}],
+                                    }
+                                    if session_id:
+                                        final_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(final_payload)}\n\n"
+                                    return
+                            except UnicodeDecodeError as enc_err:
+                                # Encoding issue - try different encoding
+                                try:
+                                    # latin-1 fallback for encoding issues (BOM already stripped by this point)
+                                    df_preview = pd.read_csv(raw_dataset_path, nrows=100, encoding='latin-1', header=header_row, skip_blank_lines=False)
+                                    enc_warn_payload = {
+                                        "event": "RunContent",
+                                        "content": "⚠️ CSV was not UTF-8 encoded. Loaded with latin-1 encoding.",
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        enc_warn_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(enc_warn_payload)}\n\n"
+                                except Exception:
+                                    enc_error_msg = (
+                                        f"**CSV Encoding Error**\n\n"
+                                        f"Could not read your CSV file due to encoding issues: {enc_err}\n\n"
+                                        f"**How to fix:**\n"
+                                        f"  • Save your file as 'CSV UTF-8' from Excel or Google Sheets\n"
+                                        f"  • Avoid special characters if possible"
+                                    )
+                                    enc_error_payload = {
+                                        "event": "RunContent",
+                                        "content": enc_error_msg,
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        enc_error_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(enc_error_payload)}\n\n"
+
+                                    final_payload = {
+                                        "event": "RunResponse",
+                                        "run_id": run_id,
+                                        "state": "failed",
+                                        "created_at": int(time.time()),
+                                        "messages": [{"role": "assistant", "content": enc_error_msg}],
+                                    }
+                                    if session_id:
+                                        final_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(final_payload)}\n\n"
+                                    return
+
+                            # Early validation: check if data is suitable for animation
+                            validation_result = validate_for_animation(df_preview, filename=os.path.basename(raw_dataset_path))
+                            if not validation_result.is_valid:
+                                # Send user-friendly validation error message
+                                validation_msg = validation_result.to_user_message()
+                                validation_payload = {
+                                    "event": "RunContent",
+                                    "content": validation_msg,
+                                    "created_at": int(time.time()),
+                                    "run_id": run_id,
+                                }
+                                if session_id:
+                                    validation_payload["session_id"] = session_id
+                                yield f"data: {json.dumps(validation_payload)}\n\n"
+
+                                # Send error event and stop
+                                error_payload = {
+                                    "event": "Error",
+                                    "content": "Dataset validation failed. Please fix the issues above and try again.",
+                                    "created_at": int(time.time()),
+                                    "run_id": run_id,
+                                }
+                                if session_id:
+                                    error_payload["session_id"] = session_id
+                                yield f"data: {json.dumps(error_payload)}\n\n"
+
+                                # Log and finish
+                                plog.warning(PipelineStep.DATA_PREPROCESSING, "Dataset validation failed", {
+                                    "errors": validation_result.errors,
+                                    "suggestions": validation_result.suggestions,
+                                    "numeric_columns": validation_result.numeric_columns,
+                                    "categorical_columns": validation_result.categorical_columns,
+                                })
+
+                                final_payload = {
+                                    "event": "RunResponse",
+                                    "run_id": run_id,
+                                    "state": "failed",
+                                    "created_at": int(time.time()),
+                                    "messages": [{
+                                        "role": "assistant",
+                                        "content": validation_msg,
+                                    }],
+                                }
+                                if session_id:
+                                    final_payload["session_id"] = session_id
+                                yield f"data: {json.dumps(final_payload)}\n\n"
+                                return
+
+                            # Log successful validation
+                            plog.debug(PipelineStep.DATA_PREPROCESSING, "Dataset validation passed", {
+                                "numeric_columns": validation_result.numeric_columns,
+                                "categorical_columns": validation_result.categorical_columns,
+                                "potential_time_column": validation_result.potential_time_column,
+                                "potential_group_column": validation_result.potential_group_column,
+                            })
+
                             preproc_info = preprocess_dataset(df_preview, filename=os.path.basename(raw_dataset_path))
                             det = preproc_info.get("detection")
                             cols = preproc_info.get("columns", {})
@@ -527,10 +804,19 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                 if session_id:
                                     inject_payload["session_id"] = session_id
                                 yield f"data: {json.dumps(inject_payload)}\n\n"
+
+                                # Update session context with data binding
+                                if session_id and not context_from_session:
+                                    update_session_context(
+                                        session_id=session_id,
+                                        data_binding=provisional_binding,
+                                    )
                             # If dataset is wide, perform full melt on entire file to a new artifacts CSV
                             if is_wide:
                                 try:
-                                    full_df = pd.read_csv(raw_dataset_path)
+                                    # Use header_row and skip_blank_lines=False to match preview reading
+                                    # Use utf-8-sig encoding to handle BOM
+                                    full_df = pd.read_csv(raw_dataset_path, header=header_row, skip_blank_lines=False, encoding='utf-8-sig')
                                     # Identify year-like columns (4-digit) or numeric sequential headers
                                     year_cols = [c for c in full_df.columns if isinstance(c, str) and c.isdigit() and len(c) == 4]
                                     if not year_cols:
@@ -568,6 +854,13 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                         if session_id:
                                             stats_payload["session_id"] = session_id
                                         yield f"data: {json.dumps(stats_payload)}\n\n"
+
+                                        # Update session context with melted dataset path
+                                        if session_id:
+                                            update_session_context(
+                                                session_id=session_id,
+                                                melted_dataset_path=melted_dataset_path,
+                                            )
                                     else:
                                         no_melt_payload = {
                                             "event": "RunContent",
@@ -589,6 +882,10 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                         melt_err_payload["session_id"] = session_id
                                     yield f"data: {json.dumps(melt_err_payload)}\n\n"
                     except Exception as _pe:
+                        plog.error(PipelineStep.DATA_PREPROCESSING, f"Preprocessing failed: {_pe}", {
+                            "raw_dataset_path": raw_dataset_path,
+                            "error_type": type(_pe).__name__,
+                        }, exception=_pe)
                         warn_payload = {
                             "event": "RunContent",
                             "content": f"Preprocessing skipped: {_pe}",
@@ -611,8 +908,12 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         generate_bar_race_code,
                         generate_line_evolution_code,
                         generate_bento_grid_code,
+                        generate_count_bar_code,
+                        generate_single_numeric_code,
                     )  # type: ignore
-                    spec = infer_spec_from_prompt(msg)
+                    # Pass csv_path for data-driven inference
+                    dataset_path_for_spec = getattr(body, "csv_path", None)
+                    spec = infer_spec_from_prompt(msg, csv_path=dataset_path_for_spec)
                     # Inject melted dataset bindings BEFORE template routing if available
                     try:
                         if provisional_binding and hasattr(spec, "data_binding"):
@@ -638,18 +939,62 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                             if session_id:
                                 bind_payload["session_id"] = session_id
                             yield f"data: {json.dumps(bind_payload)}\n\n"
-                            # Auto-assign chart_type to distribution if wide melt applied and chart_type unknown
-                            if dataset_melt_applied and (getattr(spec, "chart_type", None) in (None, "", "unknown")):
-                                spec.chart_type = "distribution"
-                                auto_ct_payload = {
-                                    "event": "RunContent",
-                                    "content": "Auto-selected chart_type=distribution for wide year-format dataset.",
-                                    "created_at": int(time.time()),
-                                    "run_id": run_id,
-                                }
-                                if session_id:
-                                    auto_ct_payload["session_id"] = session_id
-                                yield f"data: {json.dumps(auto_ct_payload)}\n\n"
+                            # Auto-assign chart_type using smart inference if unknown
+                            if getattr(spec, "chart_type", None) in (None, "", "unknown"):
+                                # Try smart chart inference first
+                                try:
+                                    from agents.tools.chart_inference import recommend_chart
+                                    _infer_path = dataset_path_for_spec or melted_dataset_path
+                                    if _infer_path and os.path.exists(_infer_path):
+                                        _recs = recommend_chart(_infer_path, msg)
+                                        if _recs and _recs[0].score >= 0.5:
+                                            spec.chart_type = _recs[0].chart_type
+                                            smart_payload = {
+                                                "event": "RunContent",
+                                                "content": f"Smart chart inference: '{_recs[0].chart_type}' (score={_recs[0].score}, confidence={_recs[0].confidence}). Reasons: {', '.join(_recs[0].reasons[:3])}",
+                                                "created_at": int(time.time()),
+                                                "run_id": run_id,
+                                            }
+                                            if session_id:
+                                                smart_payload["session_id"] = session_id
+                                            yield f"data: {json.dumps(smart_payload)}\n\n"
+
+                                            # Update session context with inferred chart_type
+                                            if session_id:
+                                                update_session_context(
+                                                    session_id=session_id,
+                                                    chart_type=_recs[0].chart_type,
+                                                )
+                                except Exception as _smart_err:
+                                    smart_err_payload = {
+                                        "event": "RunContent",
+                                        "content": f"Smart chart inference skipped: {_smart_err}",
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        smart_err_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(smart_err_payload)}\n\n"
+
+                                # Fallback to distribution for wide melt if still unknown
+                                if dataset_melt_applied and getattr(spec, "chart_type", None) in (None, "", "unknown"):
+                                    spec.chart_type = "distribution"
+                                    auto_ct_payload = {
+                                        "event": "RunContent",
+                                        "content": "Fallback: Auto-selected chart_type=distribution for wide year-format dataset.",
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        auto_ct_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(auto_ct_payload)}\n\n"
+
+                                    # Update session context with fallback chart_type
+                                    if session_id:
+                                        update_session_context(
+                                            session_id=session_id,
+                                            chart_type="distribution",
+                                        )
                     except Exception as _inj_err:
                         inj_err_payload = {
                             "event": "RunContent",
@@ -666,7 +1011,7 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                     try:
                         if getattr(body, "chart_type", None):
                             ct = str(body.chart_type).strip().lower()
-                            if ct in ("bubble", "distribution", "bar_race", "line_evolution", "bento_grid"):
+                            if ct in ("bubble", "distribution", "bar_race", "line_evolution", "bento_grid", "count_bar", "single_numeric"):
                                 spec.chart_type = ct
                                 explicit_chart = True
                                 requested_ct = ct
@@ -913,8 +1258,45 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                             yield f"data: {json.dumps(status)}\n\n"
                         except Exception as te:
                             template_error = f"Template failed: {te}"
+                    elif spec.chart_type == "count_bar" and dataset_path and os.path.exists(dataset_path):
+                        try:
+                            # Get count column from data binding if available
+                            _binding = getattr(spec, "data_binding", None)
+                            _count_col = getattr(_binding, "group_col", None) if _binding else None
+                            code = generate_count_bar_code(spec, dataset_path, count_column=_count_col)
+                            use_template = True
+                            status = {
+                                "event": "RunContent",
+                                "content": f"Using count bar chart template (counting by: {_count_col or 'auto-detected'}).",
+                                "created_at": int(time.time()),
+                            }
+                            if session_id:
+                                status["session_id"] = session_id
+                            status["run_id"] = run_id
+                            yield f"data: {json.dumps(status)}\n\n"
+                        except Exception as te:
+                            template_error = f"Template failed: {te}"
+                    elif spec.chart_type == "single_numeric" and dataset_path and os.path.exists(dataset_path):
+                        try:
+                            # Get category and value columns from data binding if available
+                            _binding = getattr(spec, "data_binding", None)
+                            _cat_col = getattr(_binding, "group_col", None) if _binding else None
+                            _val_col = getattr(_binding, "value_col", None) if _binding else None
+                            code = generate_single_numeric_code(spec, dataset_path, category_column=_cat_col, value_column=_val_col)
+                            use_template = True
+                            status = {
+                                "event": "RunContent",
+                                "content": f"Using single numeric bar chart template (category: {_cat_col or 'auto'}, value: {_val_col or 'auto'}).",
+                                "created_at": int(time.time()),
+                            }
+                            if session_id:
+                                status["session_id"] = session_id
+                            status["run_id"] = run_id
+                            yield f"data: {json.dumps(status)}\n\n"
+                        except Exception as te:
+                            template_error = f"Template failed: {te}"
                     else:
-                        if explicit_chart and spec.chart_type in ("bubble", "distribution", "bar_race", "line_evolution", "bento_grid") and (not dataset_path or not os.path.exists(str(dataset_path))):
+                        if explicit_chart and spec.chart_type in ("bubble", "distribution", "bar_race", "line_evolution", "bento_grid", "count_bar", "single_numeric") and (not dataset_path or not os.path.exists(str(dataset_path))):
                             err_msg = f"{spec.chart_type.capitalize()} chart requested explicitly but dataset is missing or not found. Provide csv_path or csv_dir."
                             err_payload = {
                                 "event": "RunError",
@@ -929,45 +1311,133 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                             yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
                             return
                         else:
-                            autodetected = False
+                            # Chart type is unknown or doesn't match any template
+                            # Try smart chart inference if we have a dataset
                             if (not explicit_chart) and dataset_path and os.path.exists(str(dataset_path)):
                                 try:
-                                    with open(dataset_path, "r", encoding="utf-8") as _f:
-                                        _reader = csv.DictReader(_f)
-                                        _headers = [h.lower() for h in (_reader.fieldnames or [])]
-                                    _time_candidates = ["time", "year", "tahun", "t"]
-                                    _entity_candidates = ["entity", "name", "label", "country"]
-                                    _value_candidates = ["value", "val", "score", "amount", "count"]
-                                    # Simple auto-detection for line evolution: time + multiple numeric series after melt scenario
-                                    if any(c in _headers for c in _time_candidates) and any(c in _headers for c in _entity_candidates) and any(c in _headers for c in _value_candidates):
-                                        # Could choose bar_race or line_evolution; keep existing bar_race precedence.
-                                        pass
-                                except Exception:
-                                    pass
-                            if not autodetected:
-                                if spec.chart_type == "bubble" and not dataset_path:
-                                    status_hint = "Bubble chart detected but no csv_path=... provided; falling back to LLM code generation."
-                                elif spec.chart_type == "bubble":
-                                    status_hint = f"Bubble chart detected but dataset not found at {dataset_path}; falling back to LLM."
-                                elif spec.chart_type == "distribution" and not dataset_path:
-                                    status_hint = "Distribution chart detected but no csv_path=... provided; falling back to LLM code generation."
-                                elif spec.chart_type == "distribution":
-                                    status_hint = f"Distribution chart detected but dataset not found at {dataset_path}; falling back to LLM."
-                                elif spec.chart_type == "line_evolution":
-                                    status_hint = f"Line evolution requested but dataset not found; falling back to LLM."
-                                elif spec.chart_type == "bento_grid":
-                                    status_hint = f"Bento grid requested but dataset not found; falling back to LLM."
-                                else:
-                                    status_hint = "No supported template match; falling back to LLM code generation."
-                                status = {
-                                    "event": "RunContent",
-                                    "content": status_hint,
+                                    from agents.tools.chart_inference import recommend_chart
+                                    _recs = recommend_chart(dataset_path, msg)
+                                    if _recs and _recs[0].score >= 0.5:
+                                        inferred_type = _recs[0].chart_type
+                                        spec.chart_type = inferred_type
+                                        infer_payload = {
+                                            "event": "RunContent",
+                                            "content": f"Smart inference recommends: '{inferred_type}' (score={_recs[0].score}). Attempting template...",
+                                            "created_at": int(time.time()),
+                                            "run_id": run_id,
+                                        }
+                                        if session_id:
+                                            infer_payload["session_id"] = session_id
+                                        yield f"data: {json.dumps(infer_payload)}\n\n"
+
+                                        # Now try to generate code with the inferred type
+                                        if inferred_type == "bubble":
+                                            code = generate_bubble_code(spec, dataset_path)
+                                            use_template = True
+                                        elif inferred_type == "distribution":
+                                            code = generate_distribution_code(spec, dataset_path)
+                                            use_template = True
+                                        elif inferred_type == "bar_race":
+                                            code = generate_bar_race_code(spec, dataset_path)
+                                            use_template = True
+                                        elif inferred_type == "line_evolution":
+                                            code = generate_line_evolution_code(spec, dataset_path)
+                                            use_template = True
+                                        elif inferred_type == "bento_grid":
+                                            code = generate_bento_grid_code(spec, dataset_path)
+                                            use_template = True
+                                        elif inferred_type == "count_bar":
+                                            _binding = getattr(spec, "data_binding", None)
+                                            _count_col = getattr(_binding, "group_col", None) if _binding else None
+                                            code = generate_count_bar_code(spec, dataset_path, count_column=_count_col)
+                                            use_template = True
+                                        elif inferred_type == "single_numeric":
+                                            _binding = getattr(spec, "data_binding", None)
+                                            _cat_col = getattr(_binding, "group_col", None) if _binding else None
+                                            _val_col = getattr(_binding, "value_col", None) if _binding else None
+                                            code = generate_single_numeric_code(spec, dataset_path, category_column=_cat_col, value_column=_val_col)
+                                            use_template = True
+
+                                        if use_template:
+                                            template_msg_payload = {
+                                                "event": "RunContent",
+                                                "content": f"Using {inferred_type} template based on smart inference.",
+                                                "created_at": int(time.time()),
+                                                "run_id": run_id,
+                                            }
+                                            if session_id:
+                                                template_msg_payload["session_id"] = session_id
+                                            yield f"data: {json.dumps(template_msg_payload)}\n\n"
+                                except Exception as _inf_err:
+                                    infer_err_payload = {
+                                        "event": "RunContent",
+                                        "content": f"Smart inference failed: {_inf_err}. Falling back to LLM.",
+                                        "created_at": int(time.time()),
+                                        "run_id": run_id,
+                                    }
+                                    if session_id:
+                                        infer_err_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(infer_err_payload)}\n\n"
+
+                            if explicit_chart and spec.chart_type in ("bubble", "distribution", "bar_race", "line_evolution", "bento_grid", "count_bar", "single_numeric") and (not dataset_path or not os.path.exists(str(dataset_path))):
+                                err_msg = f"{spec.chart_type.capitalize()} chart requested explicitly but dataset is missing or not found. Provide csv_path or csv_dir."
+                                err_payload = {
+                                    "event": "RunError",
+                                    "content": err_msg,
                                     "created_at": int(time.time()),
+                                    "run_id": run_id,
                                 }
                                 if session_id:
-                                    status["session_id"] = session_id
-                                status["run_id"] = run_id
-                                yield f"data: {json.dumps(status)}\n\n"
+                                    err_payload["session_id"] = session_id
+                                fail_run(run_id, err_msg)
+                                yield f"data: {json.dumps(err_payload)}\n\n"
+                                yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
+                                return
+
+                            if not use_template:
+                                autodetected = False
+                                if (not explicit_chart) and dataset_path and os.path.exists(str(dataset_path)):
+                                    try:
+                                        with open(dataset_path, "r", encoding="utf-8") as _f:
+                                            _reader = csv.DictReader(_f)
+                                            _headers = [h.lower() for h in (_reader.fieldnames or [])]
+                                        _time_candidates = ["time", "year", "tahun", "t"]
+                                        _entity_candidates = ["entity", "name", "label", "country"]
+                                        _value_candidates = ["value", "val", "score", "amount", "count"]
+                                        # Simple auto-detection for line evolution: time + multiple numeric series after melt scenario
+                                        if any(c in _headers for c in _time_candidates) and any(c in _headers for c in _entity_candidates) and any(c in _headers for c in _value_candidates):
+                                            # Could choose bar_race or line_evolution; keep existing bar_race precedence.
+                                            pass
+                                    except Exception:
+                                        pass
+                                if not autodetected:
+                                    if spec.chart_type == "bubble" and not dataset_path:
+                                        status_hint = "Bubble chart detected but no csv_path=... provided; falling back to LLM code generation."
+                                    elif spec.chart_type == "bubble":
+                                        status_hint = f"Bubble chart detected but dataset not found at {dataset_path}; falling back to LLM."
+                                    elif spec.chart_type == "distribution" and not dataset_path:
+                                        status_hint = "Distribution chart detected but no csv_path=... provided; falling back to LLM code generation."
+                                    elif spec.chart_type == "distribution":
+                                        status_hint = f"Distribution chart detected but dataset not found at {dataset_path}; falling back to LLM."
+                                    elif spec.chart_type == "line_evolution":
+                                        status_hint = f"Line evolution requested but dataset not found; falling back to LLM."
+                                    elif spec.chart_type == "bento_grid":
+                                        status_hint = f"Bento grid requested but dataset not found; falling back to LLM."
+                                    elif spec.chart_type == "count_bar":
+                                        status_hint = f"Count bar chart requested but dataset not found; falling back to LLM."
+                                    elif spec.chart_type == "single_numeric":
+                                        status_hint = f"Single numeric bar chart requested but dataset not found; falling back to LLM."
+                                    else:
+                                        status_hint = "No supported template match; falling back to LLM code generation."
+                                    status = {
+                                        "event": "RunContent",
+                                        "content": status_hint,
+                                        "created_at": int(time.time()),
+                                    }
+                                    if session_id:
+                                        status["session_id"] = session_id
+                                    status["run_id"] = run_id
+                                    yield f"data: {json.dumps(status)}\n\n"
                 except Exception as e:
                     template_error = f"Spec inference unavailable: {e}"
                 if template_error:
@@ -996,7 +1466,31 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         warn["run_id"] = run_id
                         yield f"data: {json.dumps(warn)}\n\n"
                 if not use_template:
+                    # LLM Fallback path - comprehensive logging
+                    plog.info(PipelineStep.LLM_FALLBACK_START, "No template matched, starting LLM fallback code generation", {
+                        "engine": body.code_engine or "anthropic",
+                        "model": body.code_model or "default",
+                        "prompt_length": len(msg),
+                        "has_extra_rules": bool(body.code_system_prompt),
+                    })
+
+                    fallback_status = {
+                        "event": "RunContent",
+                        "content": "No template matched. Starting LLM code generation (this may take 10-30 seconds)...",
+                        "created_at": int(time.time()),
+                        "run_id": run_id,
+                    }
+                    if session_id:
+                        fallback_status["session_id"] = session_id
+                    yield f"data: {json.dumps(fallback_status)}\n\n"
+
                     try:
+                        plog.start_timer(PipelineStep.CODE_GENERATION_START)
+                        plog.info(PipelineStep.CODE_GENERATION_START, "Calling LLM for code generation", {
+                            "engine": body.code_engine or "anthropic",
+                            "model": body.code_model or "default",
+                        })
+
                         code = generate_manim_code(
                             prompt=msg,
                             engine=(body.code_engine or "anthropic"),
@@ -1004,7 +1498,14 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                             temperature=0.2,
                             max_tokens=1200,
                             extra_rules=(body.code_system_prompt or None),
+                            run_id=run_id,
                         )
+
+                        plog.step_with_duration(PipelineStep.CODE_GENERATION_COMPLETE, "LLM code generation completed successfully", {
+                            "code_length": len(code) if code else 0,
+                            "has_genscene": "class GenScene" in (code or ""),
+                        })
+
                         status = {
                             "event": "RunContent",
                             "content": "Code generated. Creating preview...",
@@ -1014,7 +1515,14 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                             status["session_id"] = session_id
                         status["run_id"] = run_id
                         yield f"data: {json.dumps(status)}\n\n"
+
                     except CodeGenerationError as e:
+                        plog.error(PipelineStep.CODE_GENERATION_ERROR, f"LLM code generation failed: {e}", {
+                            "engine": body.code_engine or "anthropic",
+                            "model": body.code_model or "default",
+                            "error_type": type(e).__name__,
+                        }, exception=e)
+
                         err = {
                             "event": "RunError",
                             "content": str(e),
@@ -1024,6 +1532,30 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                             err["session_id"] = session_id
                         err["run_id"] = run_id
                         fail_run(run_id, str(e))
+                        plog.info(PipelineStep.RUN_FAILED, "Run failed due to code generation error", {"error": str(e)})
+                        cleanup_logger(run_id)
+                        yield f"data: {json.dumps(err)}\n\n"
+                        yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
+                        return
+
+                    except Exception as e:
+                        plog.error(PipelineStep.CODE_GENERATION_ERROR, f"Unexpected error during LLM code generation: {e}", {
+                            "engine": body.code_engine or "anthropic",
+                            "error_type": type(e).__name__,
+                            "traceback": traceback.format_exc(),
+                        }, exception=e)
+
+                        err = {
+                            "event": "RunError",
+                            "content": f"Unexpected error: {str(e)}",
+                            "created_at": int(time.time()),
+                        }
+                        if session_id:
+                            err["session_id"] = session_id
+                        err["run_id"] = run_id
+                        fail_run(run_id, str(e))
+                        plog.info(PipelineStep.RUN_FAILED, "Run failed due to unexpected error", {"error": str(e)})
+                        cleanup_logger(run_id)
                         yield f"data: {json.dumps(err)}\n\n"
                         yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
                         return
@@ -1041,6 +1573,10 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
 
             # Ensure code is available
             if not isinstance(code, str) or not code.strip():
+                plog.error(PipelineStep.CODE_GENERATION_ERROR, "No code was generated", {
+                    "code_type": type(code).__name__,
+                    "code_value": repr(code)[:100] if code else "(None)",
+                })
                 err_payload = {
                     "event": "RunError",
                     "content": "No code was generated for preview.",
@@ -1050,9 +1586,15 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                 if session_id:
                     err_payload["session_id"] = session_id
                 fail_run(run_id, err_payload["content"])
+                plog.info(PipelineStep.RUN_FAILED, "Run failed - no code generated")
+                cleanup_logger(run_id)
                 yield f"data: {json.dumps(err_payload)}\n\n"
                 yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
                 return
+
+            plog.info(PipelineStep.CODE_VALIDATION_START, "Starting code validation", {
+                "code_length": len(code),
+            })
 
             # Pre-preview: syntax validation and auto-fix loop (Point 1)
             max_fix_attempts = 2
@@ -1060,6 +1602,9 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
             while fix_attempt <= max_fix_attempts:
                 ok, v_err = _quick_validate(code)
                 if ok:
+                    plog.info(PipelineStep.CODE_VALIDATION_PASS, "Code validation passed", {
+                        "attempts": fix_attempt,
+                    })
                     if fix_attempt > 0:
                         status = {
                             "event": "RunContent",
@@ -1072,7 +1617,16 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         yield f"data: {json.dumps(status)}\n\n"
                     break
                 # Not ok
+                plog.warning(PipelineStep.CODE_VALIDATION_FAIL, f"Code validation failed: {v_err}", {
+                    "attempt": fix_attempt,
+                    "max_attempts": max_fix_attempts,
+                    "error": v_err,
+                })
                 if fix_attempt == max_fix_attempts:
+                    plog.error(PipelineStep.CODE_VALIDATION_FAIL, "Code validation failed after all attempts", {
+                        "error": v_err,
+                        "attempts": fix_attempt,
+                    })
                     err_payload = {
                         "event": "RunError",
                         "content": f"Code validation failed: {v_err}",
@@ -1082,10 +1636,15 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                     if session_id:
                         err_payload["session_id"] = session_id
                     fail_run(run_id, err_payload["content"])
+                    plog.info(PipelineStep.RUN_FAILED, "Run failed - code validation error")
+                    cleanup_logger(run_id)
                     yield f"data: {json.dumps(err_payload)}\n\n"
                     yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
                     return
                 # Try auto-fix
+                plog.info(PipelineStep.CODE_AUTO_FIX_START, f"Attempting auto-fix {fix_attempt + 1}/{max_fix_attempts}", {
+                    "error": v_err,
+                })
                 notice = {
                     "event": "RunContent",
                     "content": f"Syntax issue detected ({v_err}). Attempting auto-fix {fix_attempt + 1}/{max_fix_attempts}...",
@@ -1102,12 +1661,25 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         engine=(body.code_engine or "anthropic"),
                         model=(body.code_model or None),
                     )
-                except CodeGenerationError:
+                    plog.info(PipelineStep.CODE_AUTO_FIX_COMPLETE, "Auto-fix attempt completed", {
+                        "attempt": fix_attempt + 1,
+                    })
+                except CodeGenerationError as fix_err:
+                    plog.error(PipelineStep.CODE_AUTO_FIX_ERROR, f"Auto-fix failed: {fix_err}", {
+                        "attempt": fix_attempt + 1,
+                    })
                     # Keep code as-is; next loop may still pass if minor
                     pass
                 fix_attempt += 1
 
             # 2) Preview frames with runtime auto-fix loop (Point 2)
+            plog.info(PipelineStep.PREVIEW_START, "Starting preview generation", {
+                "aspect_ratio": aspect_ratio,
+                "sample_every": preview_sample_every,
+                "max_frames": preview_max_frames,
+                "quality": quality,
+            })
+            plog.start_timer(PipelineStep.PREVIEW_START)
             set_state(run_id, RunState.PREVIEWING, "Generating preview...")
             try:
                 persist_run_state(run_id, "PREVIEWING", "Generating preview...")
@@ -1167,11 +1739,24 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
 
                 if not had_runtime_error:
                     # Preview completed successfully; continue pipeline
+                    plog.step_with_duration(PipelineStep.PREVIEW_COMPLETE, "Preview generation completed successfully", {
+                        "runtime_attempts": runtime_attempt,
+                    })
                     break
 
                 # We had a preview error (classified)
+                plog.error(PipelineStep.PREVIEW_ERROR, f"Preview error: {last_error_msg}", {
+                    "attempt": runtime_attempt,
+                    "max_attempts": max_runtime_fix_attempts,
+                    "allow_llm_fix": allow_llm_fix,
+                })
                 if (runtime_attempt == max_runtime_fix_attempts) or (not allow_llm_fix):
                     # Give up early if classification forbids LLM fix OR attempts exhausted
+                    plog.error(PipelineStep.PREVIEW_ERROR, "Preview failed after all attempts or LLM fix not allowed", {
+                        "last_error": last_error_msg,
+                        "attempts": runtime_attempt,
+                        "allow_llm_fix": allow_llm_fix,
+                    })
                     fail_payload = {
                         "event": "RunError",
                         "content": last_error_msg or "Preview error",
@@ -1182,6 +1767,8 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                     if session_id:
                         fail_payload["session_id"] = session_id
                     fail_run(run_id, fail_payload["content"])
+                    plog.info(PipelineStep.RUN_FAILED, "Run failed - preview error")
+                    cleanup_logger(run_id)
                     yield f"data: {json.dumps(fail_payload)}\n\n"
                     yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
                     return
@@ -1211,6 +1798,11 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                 runtime_attempt += 1
 
             # 3) Final render to MP4
+            plog.info(PipelineStep.RENDER_START, "Starting video render", {
+                "aspect_ratio": aspect_ratio,
+                "quality": quality,
+            })
+            plog.start_timer(PipelineStep.RENDER_START)
             set_state(run_id, RunState.RENDERING, "Rendering video...")
             try:
                 persist_run_state(run_id, "RENDERING", "Rendering video...")
@@ -1249,6 +1841,9 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                             persist_artifact(run_id, "video", storage_session)
                     except Exception:
                         pass
+                    plog.step_with_duration(PipelineStep.RENDER_COMPLETE, "Video render completed successfully", {
+                        "num_videos": len(event["videos"]),
+                    })
                     complete_run(run_id, "Render completed.")
                     try:
                         persist_run_completed(run_id, "Render completed.")
@@ -1256,17 +1851,25 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         pass
                 payload["run_id"] = run_id
                 if payload["event"] == "RunError":
+                    plog.error(PipelineStep.RENDER_ERROR, f"Render error: {payload.get('content', 'Unknown')}", {
+                        "error": payload.get("content", "Render error"),
+                    })
                     fail_run(run_id, payload.get("content", "Render error"))
                     try:
                         persist_run_failed(run_id, payload.get("content", "Render error"))
                     except Exception:
                         pass
+                    plog.info(PipelineStep.RUN_FAILED, "Run failed - render error")
+                    cleanup_logger(run_id)
                     yield f"data: {json.dumps(payload)}\n\n"
                     yield f"data: {json.dumps({'event': 'RunCompleted', 'content': '', 'created_at': int(time.time()), 'run_id': run_id})}\n\n"
                     return
                 yield f"data: {json.dumps(payload)}\n\n"
 
             # 4) Done
+            plog.info(PipelineStep.RUN_COMPLETED, "Animation pipeline completed successfully", {
+                "summary": plog.get_summary(),
+            })
             complete_run(run_id, "Completed")
             try:
                 persist_run_completed(run_id, "Completed")
@@ -1310,6 +1913,7 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
             if session_id:
                 done["session_id"] = session_id
             done["run_id"] = run_id
+            cleanup_logger(run_id)
             yield f"data: {json.dumps(done)}\n\n"
 
         return StreamingResponse(

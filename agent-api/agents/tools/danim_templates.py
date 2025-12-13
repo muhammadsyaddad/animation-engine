@@ -235,18 +235,33 @@ def _format_literal(obj) -> str:
     return repr(obj)
 
 
-def generate_bubble_code(spec: object, csv_path: str) -> str:
+def generate_bubble_code(spec: object, csv_path: str, use_modern: bool = True) -> str:
     """
     Generate a modern-Manim code string that defines class GenScene(Scene) for a
     Danim-style bubble chart animation.
 
+    This function now delegates to the new modern template in
+    agents.tools.templates.bubble_chart for better visual output with:
+    - Modern color palette and theming
+    - Properly formatted axis labels (K/M/B suffixes)
+    - Smooth easing animations
+    - Clean legend with rounded background
+    - Optional entity labels on bubbles
+
     Args:
         spec: ChartSpec with data_binding filled (x,y,r,time, group optional).
         csv_path: Path to the dataset CSV.
+        use_modern: If True (default), use the new modern template. Set False for legacy behavior.
 
     Returns:
         str: Python code suitable for Manim CLI (contains `class GenScene(Scene)`).
     """
+    # Use the new modern bubble chart template by default
+    if use_modern:
+        from agents.tools.templates.bubble_chart import generate_bubble_chart
+        return generate_bubble_chart(spec, csv_path, theme="youtube_dark")
+
+    # Legacy implementation below (kept for backwards compatibility)
     # Parse dataset and compute derived metadata
     times, entities, group_of, data, (x_min, x_max, y_min, y_max), (r_min, r_max), groups_present = _parse_bubble_dataset(
         csv_path, spec.data_binding
@@ -551,7 +566,14 @@ class GenScene(Scene):
 def generate_distribution_code(spec: object, csv_path: str) -> str:
     """
     Generate a modern-Manim code string that defines class GenScene(Scene) for a
-    Danim-style distribution (histogram) animation over time.
+    distribution (histogram) animation over time.
+
+    This function now delegates to the new modern template in
+    agents.tools.templates.distribution for better visual output with:
+    - Properly formatted axis labels (K/M/B suffixes)
+    - Smart bin labeling that doesn't overlap
+    - Rotated labels to prevent collision
+    - Modern color palette and styling
 
     Args:
         spec: ChartSpec with data_binding filled (value,time[,group/entity optional]).
@@ -560,634 +582,91 @@ def generate_distribution_code(spec: object, csv_path: str) -> str:
     Returns:
         str: Python code suitable for Manim CLI (contains `class GenScene(Scene)`).
     """
-    # Read CSV and collect values per time
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Dataset not found: {csv_path}")
-
-    val_col = getattr(spec.data_binding, "value_col", None) or "value"
-    time_col = getattr(spec.data_binding, "time_col", None) or "time"
-    group_col = getattr(spec.data_binding, "group_col", None)
-    entity_col = getattr(spec.data_binding, "entity_col", None)
-
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
-
-        # Heuristic fallback for common column names
-        def _find_col(candidates):
-            for c in candidates:
-                if c in headers:
-                    return c
-                # case-insensitive search
-                for h in headers:
-                    if h.lower() == c.lower():
-                        return h
-            return None
-
-        if val_col not in headers:
-            cand = _find_col(["value", "val", "score", "amount"])
-            if cand:
-                val_col = cand
-        if time_col not in headers:
-            cand = _find_col(["time", "year", "tahun", "t"])
-            if cand:
-                time_col = cand
-        if group_col and group_col not in headers:
-            cand = _find_col([group_col, "group", "region", "area", "benua"])
-            if cand:
-                group_col = cand
-        if entity_col and entity_col not in headers:
-            cand = _find_col([entity_col, "entity", "name", "country", "label", "id"])
-            if cand:
-                entity_col = cand
-
-        required_missing = []
-        if time_col not in headers:
-            required_missing.append("time_col")
-        if val_col not in headers:
-            required_missing.append("value_col")
-        if required_missing:
-            raise ValueError(f"Missing required columns in dataset: {required_missing} (headers={headers})")
-
-        values_by_time: Dict[str, List[float]] = {}
-        all_values: List[float] = []
-        for row in reader:
-            t = (row.get(time_col) or "").strip()
-            if not t:
-                continue
-            rv = (row.get(val_col) or "").strip()
-            if not rv:
-                continue
-            try:
-                v = float(rv)
-            except ValueError:
-                continue
-            values_by_time.setdefault(t, []).append(v)
-            all_values.append(v)
-
-    if not values_by_time:
-        raise ValueError("No valid (time,value) records found in dataset.")
-
-    # Sort time tokens (numeric if possible)
-    def _tkey(tok: str):
-        try:
-            return float(tok)
-        except Exception:
-            return tok
-
-    times = sorted(values_by_time.keys(), key=_tkey)
-
-    vmin = min(all_values) if all_values else 0.0
-    vmax = max(all_values) if all_values else 1.0
-    if vmin == vmax:
-        vmin -= 0.5
-        vmax += 0.5
-
-    # Build histogram bins (10 bins)
-    nbins = 10
-    span = (vmax - vmin)
-    step = span / nbins
-    edges = [vmin + i * step for i in range(nbins + 1)]
-    # Guard against numeric issues
-    if step <= 0:
-        edges = [vmin + i for i in range(nbins + 1)]
-
-    # Counts per time
-    hist_map: Dict[str, List[int]] = {}
-    ymax_count = 1
-    for t in times:
-        counts = [0] * nbins
-        for v in values_by_time.get(t, []):
-            # Compute bin index
-            idx = int((v - vmin) / step) if step > 0 else 0
-            if idx < 0:
-                idx = 0
-            if idx >= nbins:
-                idx = nbins - 1
-            counts[idx] += 1
-        ymax_count = max(ymax_count, max(counts) if counts else 0)
-        hist_map[t] = counts
-
-    # Axis labels/decimals (reuse from spec.axes when relevant)
-    x_label = getattr(spec.axes, "x_label", "Value") if getattr(spec, "axes", None) else "Value"
-    y_label = getattr(spec.axes, "y_label", "Count") if getattr(spec.axes, "y_label", None) else "Count"
-    # Fallback normalization to ensure labels are never None/empty (prevents Text(None) AttributeError)
-    x_label = x_label or "Value"
-    y_label = y_label or "Count"
-    show_axis_labels = getattr(spec.axes, "show_axis_labels", True) if getattr(spec, "axes", None) else True
-
-    # Style
-    label_language = getattr(spec.style, "label_language", None) if getattr(spec, "style", None) else None
-
-    # Timing
-    total_time = getattr(spec.timing, "total_time", 30.0) if getattr(spec, "timing", None) else 30.0
-    creation_time = getattr(spec.timing, "creation_time", 2.0) if getattr(spec, "timing", None) else 2.0
-    transform_ratio = getattr(spec.timing, "transform_ratio", 0.3) if getattr(spec, "timing", None) else 0.3
-
-    steps = max(1, len(times) - 1)
-    transform_total_time = max(0.5, total_time - creation_time)
-    per_step_time = transform_total_time / steps
-
-    # Bar labels as ranges "a-b"
-    def _fmt_bin_label(a: float, b: float) -> str:
-        return f"{a:.2f}-{b:.2f}"
-
-    bin_labels = [_fmt_bin_label(edges[i], edges[i + 1]) for i in range(nbins)]
-
-    # Embed literals
-    lit_times = _format_literal(times)
-    lit_edges = _format_literal(edges)
-    lit_labels = _format_literal(bin_labels)
-    lit_hists = _format_literal(hist_map)
-    y_max = max(1, int(math.ceil(ymax_count * 1.1)))
-
-    code = f'''
-from manim import *
-import math
-
-# Embedded histogram data
-TIMES = {lit_times}
-BIN_EDGES = {lit_edges}
-BIN_LABELS = {lit_labels}
-HISTS = {lit_hists}  # HISTS[time] = [counts...]
-
-X_LABEL = {repr(x_label)}
-Y_LABEL = {repr(y_label)}
-SHOW_AXIS_LABELS = {show_axis_labels}
-
-CREATION_TIME = {creation_time}
-PER_STEP_TIME = {per_step_time}
-
-def make_chart(counts: list[int]) -> BarChart:
-    y_max = {y_max}
-    chart = BarChart(
-        values=counts,
-        bar_names=BIN_LABELS,
-        y_range=[0, y_max, max(1, y_max // 5)],
-        y_length=4.0,
-        x_length=8.0,
-        bar_width=0.6,
-    )
-    # Guard each axis label to avoid constructing Text with None/empty
-    if SHOW_AXIS_LABELS and (X_LABEL or "").strip():
-        chart.x_axis.label = Text(str(X_LABEL)).scale(0.5)
-        chart.x_axis.label.next_to(chart.x_axis, DOWN, buff=0.3)
-        chart.add(chart.x_axis.label)
-    if SHOW_AXIS_LABELS and (Y_LABEL or "").strip():
-        chart.y_axis.label = Text(str(Y_LABEL)).scale(0.5)
-        chart.y_axis.label.next_to(chart.y_axis, LEFT, buff=0.3)
-        chart.add(chart.y_axis.label)
-    return chart
-
-class GenScene(Scene):
-    def construct(self):
-        if not TIMES:
-            self.play(Write(Text("No data")))
-            return
-
-        t0 = TIMES[0]
-        chart = make_chart(HISTS.get(t0, [0]*len(BIN_LABELS)))
-        title = Text(str(t0), font_size=36, color=PURPLE_E).to_corner(UL, buff=0.6)
-
-        self.play(FadeIn(chart), run_time=CREATION_TIME * 0.6)
-        self.play(FadeIn(title), run_time=CREATION_TIME * 0.4)
-
-        for ti in range(1, len(TIMES)):
-            t = TIMES[ti]
-            new_chart = make_chart(HISTS.get(t, [0]*len(BIN_LABELS)))
-            new_title = Text(str(t), font_size=36, color=PURPLE_E).to_corner(UL, buff=0.6)
-
-            # Align positions to improve Transform quality
-            new_chart.move_to(chart.get_center())
-            self.play(Transform(chart, new_chart), run_time=PER_STEP_TIME * 0.8)
-            self.play(Transform(title, new_title), run_time=PER_STEP_TIME * 0.2)
-
-        self.wait(0.5)
-'''
-    return code.strip()
+    # Use the new modern distribution template
+    from agents.tools.templates.distribution import generate_distribution
+    return generate_distribution(spec, csv_path, theme="youtube_dark")
 
 def generate_bar_race_code(spec: object, csv_path: str) -> str:
     """
     Generate 'True' Bar Chart Race code where bars actually swap positions via ranking logic.
+
+    This function delegates to the story-driven bar race template with:
+    - Story-driven narrative structure (intro, reveal, race, conclusion)
+    - Auto-detected insights (leader changes, big jumps)
+    - Modern color palette
+    - Smooth easing animations
+    - Proper value formatting (K/M/B suffixes)
+    - Rounded corners and polished styling
+    - Configurable narrative styles
+
+    Args:
+        spec: ChartSpec with data_binding filled.
+        csv_path: Path to the dataset CSV.
+
+    Returns:
+        str: Python code suitable for Manim CLI (contains `class GenScene(Scene)`).
     """
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Dataset not found: {csv_path}")
-
-    # --- 1. DATA INGESTION (Sama seperti sebelumnya, tapi kita butuh struktur data lebih rapi) ---
-    # Resolve columns
-    value_col = getattr(getattr(spec, "data_binding", None), "value_col", None) or "value"
-    time_col = getattr(getattr(spec, "data_binding", None), "time_col", None) or "time"
-    category_col = getattr(getattr(spec, "data_binding", None), "entity_col", None) or "category"
-
-    # Helper resolve headers (sama seperti kodemu sebelumnya)
-    def _resolve_headers(headers, target, candidates):
-        if target in headers: return target
-        lower = {h.lower(): h for h in headers}
-        for c in candidates:
-            if c in headers: return c
-            if c.lower() in lower: return lower[c.lower()]
-        return target
-
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
-
-        # Smart detection
-        time_col = _resolve_headers(headers, time_col, ["time", "year", "date", "t"])
-        value_col = _resolve_headers(headers, value_col, ["value", "count", "score", "gdp", "pop"])
-        category_col = _resolve_headers(headers, category_col, ["name", "entity", "country", "label", "item"])
-
-        # Parsing
-        data_by_time = {} # { time: { category: value } }
-        all_cats = set()
-
-        for row in reader:
-            t = (row.get(time_col) or "").strip()
-            c = (row.get(category_col) or "").strip()
-            v_str = (row.get(value_col) or "0").strip()
-
-            if not t or not c: continue
-            try:
-                v = float(v_str)
-            except:
-                continue
-
-            if t not in data_by_time: data_by_time[t] = {}
-            data_by_time[t][c] = v
-            all_cats.add(c)
-
-    # Sort Times
-    def _tkey(tok):
-        try: return float(tok)
-        except: return tok
-    times = sorted(data_by_time.keys(), key=_tkey)
-
-    # --- 2. LOGIC: FILTER TOP K (Agar layar tidak penuh) ---
-    TOP_K = 10
-    # Kita cari Top K categories secara global atau based on start/end value
-    # Simplified strategy: Ambil Top K pada time terakhir (biasanya ini pemenangnya)
-    last_t = times[-1]
-    last_ranking = sorted(data_by_time[last_t].items(), key=lambda x: x[1], reverse=True)
-    top_cats = [x[0] for x in last_ranking[:TOP_K]]
-
-    # Tapi kita harus handle kategori yang mungkin kuat di awal tapi hilang di akhir.
-    # Untuk safety, kita ambil union dari Top K start dan Top K end, lalu limit max 15.
-    t0 = times[0]
-    start_ranking = sorted(data_by_time[t0].items(), key=lambda x: x[1], reverse=True)
-    start_cats = [x[0] for x in start_ranking[:TOP_K]]
-    final_cats_set = set(top_cats + start_cats)
-    final_cats = list(final_cats_set)[:12] # Limit 12 bar agar visual rapi
-
-    # Build Data Matrix
-    # DATA = { time: { cat: val } } -- hanya untuk final_cats
-    clean_data = {}
-    global_max = 0
-    for t in times:
-        clean_data[t] = {}
-        for c in final_cats:
-            val = data_by_time[t].get(c, 0.0)
-            clean_data[t][c] = val
-            if val > global_max: global_max = val
-
-    # --- 3. CONFIGURATION & FORMATTING ---
-    timing = getattr(spec, "timing", None)
-    total_time = getattr(timing, "total_time", 15.0) if timing else 15.0
-
-    # Palette Colors
-    colors = ["#2364AA", "#3DA5D9", "#73BFB8", "#FEC601", "#EA7317",
-              "#E63946", "#F1FAEE", "#A8DADC", "#457B9D", "#1D3557"]
-
-    cat_colors = {c: colors[i % len(colors)] for i, c in enumerate(final_cats)}
-
-    # Embed Literals
-    lit_times = _format_literal(times)
-    lit_data = _format_literal(clean_data)
-    lit_colors = _format_literal(cat_colors)
-    lit_cats = _format_literal(final_cats)
-
-    # --- 4. GENERATE MANIM CODE ---
-    code = f'''
-from manim import *
-
-# --- DATA ---
-TIMES = {lit_times}
-DATA = {lit_data}
-COLORS = {lit_colors}
-CATEGORIES = {lit_cats}
-MAX_VAL = {global_max}
-RUN_TIME = {total_time}
-
-class GenScene(Scene):
-    def construct(self):
-        # 1. SETUP LAYOUT
-        # Area Bar Chart: Kiri ke Kanan (-6 sampai 6), Atas ke Bawah (3 sampai -3)
-        # Sumbu Y (Ranking) tidak digambar, tapi Logic-nya ada.
-
-        # Title (Time Counter)
-        year_label = Text(str(TIMES[0]), font_size=72, weight=BOLD, color=GREY_A)
-        year_label.to_corner(DR, buff=1.0)
-        self.add(year_label)
-
-        # Scale Factor
-        # Lebar maksimal bar = 10 unit.
-        # width = (value / MAX_VAL) * 10
-        scale_factor = 10.0 / MAX_VAL if MAX_VAL > 0 else 1.0
-
-        # Container untuk Bar Objects
-        # structure: bars[category] = VGroup(rect, label_name, label_val)
-        bars = {{}}
-
-        # Posisi Y untuk ranking.
-        # Rank 0 (Top) di Y=2.5, Rank N di bawahnya.
-        # Spasi antar bar = 0.8
-        def get_y_pos(rank):
-            return 2.5 - (rank * 0.7)
-
-        # 2. INITIALIZE OBJECTS (AT T=0)
-        t0 = TIMES[0]
-        # Sort initial rank
-        current_data = [(c, DATA[t0].get(c, 0)) for c in CATEGORIES]
-        current_data.sort(key=lambda x: x[1], reverse=True) # Sort by value desc
-
-        for rank, (cat, val) in enumerate(current_data):
-            # Bar Shape
-            bar_width = val * scale_factor
-            rect = RoundedRectangle(corner_radius=0.15, height=0.5, width=bar_width, color=COLORS[cat])
-            rect.set_fill(COLORS[cat], opacity=0.8)
-            rect.set_stroke(width=0)
-            # Align Left
-            rect.move_to(ORIGIN, aligned_edge=LEFT)
-
-            # Text Name (Inside Left or Outside Left if too small)
-            name = Text(cat, font_size=20, color=WHITE).next_to(rect, RIGHT, buff=-rect.width + 0.2)
-            if rect.width < 2.0: # Kalau bar pendek, taruh nama di kanan
-                 name.next_to(rect, RIGHT, buff=0.2)
-
-            # Value Counter (Right side of bar)
-            val_text = DecimalNumber(val, num_decimal_places=0, font_size=20, color=WHITE)
-            val_text.next_to(rect, RIGHT, buff=0.2)
-            if rect.width < 2.0:
-                 val_text.next_to(name, RIGHT, buff=0.2)
-
-            # Grouping
-            group = VGroup(rect, name, val_text)
-            group.move_to([ -5, get_y_pos(rank), 0 ], aligned_edge=LEFT) # Set Initial Y Position
-
-            bars[cat] = group
-            self.add(group)
-
-        # 3. ANIMATION LOOP
-        step_time = RUN_TIME / (len(TIMES) - 1)
-
-        for i in range(1, len(TIMES)):
-            t_next = TIMES[i]
-
-            # Get data & Calculate New Ranks
-            next_data = [(c, DATA[t_next].get(c, 0)) for c in CATEGORIES]
-            next_data.sort(key=lambda x: x[1], reverse=True)
-
-            anims = []
-
-            # Update Time Label
-            # Hack: Manim Text change is distinct animation, usually Transform(year_label, new_label)
-            new_year = Text(str(t_next), font_size=72, weight=BOLD, color=GREY_A).move_to(year_label)
-            anims.append(Transform(year_label, new_year))
-
-            for rank, (cat, val) in enumerate(next_data):
-                group = bars[cat]
-                rect = group[0]
-                name = group[1]
-                val_text = group[2]
-
-                # A. Move to new Rank Y Position
-                target_y = get_y_pos(rank)
-                # Slide animation
-                anims.append(group.animate.move_to([ -5, target_y, 0 ], aligned_edge=LEFT))
-
-                # B. Grow/Shrink Bar Width
-                new_width = max(0.01, val * scale_factor)
-                anims.append(rect.animate.stretch_to_fit_width(new_width, about_edge=LEFT))
-
-                # C. Update Number
-                anims.append(val_text.animate.set_value(val))
-
-                # D. Adjust Text Positions (Name & Value)
-                # Ini trik sulit di Manim: Text harus ikut ujung bar.
-                # Kita pakai ValueTracker atau Updater biasanya.
-                # Tapi untuk simplicity template: Kita re-position text di next frame.
-                # Karena .animate menangani interpolasi, kita biarkan Group logic menangani posisi relatif
-                # Namun, jika bar memanjang, posisi text relatif terhadap Group center berubah.
-
-                # FIX: Gunakan updater untuk label agar selalu menempel di ujung bar SELAMA animasi
-                def updater_factory(r, n, v):
-                    def update_labels(mob):
-                        # Logic: Nempel di ujung kanan bar
-                        if r.width > 2.0:
-                            n.next_to(r, RIGHT, buff=-r.width + 0.2)
-                            v.next_to(r, RIGHT, buff=0.2)
-                        else:
-                            n.next_to(r, RIGHT, buff=0.2)
-                            v.next_to(n, RIGHT, buff=0.2)
-                    return update_labels
-
-                # Kita tidak bisa attach updater di dalam loop play.
-                # Jadi kita biarkan Manim interpolasi group secara linear.
-                # Visual mungkin sedikit off saat bar tumbuh cepat, tapi acceptable untuk MVP.
-                # Untuk hasil perfect, text harus punya updater.
-
-            self.play(*anims, run_time=step_time, rate_func=linear)
-
-        self.wait(2)
-'''
-    return code.strip()
+    from agents.tools.templates.bar_race import generate_bar_race
+    return generate_bar_race(
+        spec,
+        csv_path,
+        theme="youtube_dark",
+        include_intro=True,
+        include_conclusion=True,
+        auto_highlights=True,
+    )
 
 def generate_line_evolution_code(spec: object, csv_path: str) -> str:
     """
     Generate a 'Dynamic Line Evolution' chart.
     Perfect for single-variable time series (Stock price, Temperature, etc.).
+
+    This function now delegates to the new modern template in
+    agents.tools.templates.line_evolution for better visual output with:
+    - Glowing tracking dot
+    - Smooth curve drawing with area fill
+    - Animated value counter
+    - Modern color palette and styling
+
+    Args:
+        spec: ChartSpec with data_binding filled.
+        csv_path: Path to the dataset CSV.
+
+    Returns:
+        str: Python code suitable for Manim CLI (contains `class GenScene(Scene)`).
     """
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Dataset not found: {csv_path}")
-
-    # --- 1. DATA PARSING (Mencari Time & Value) ---
-    # Logic parsing mirip sebelumnya, tapi kita fokus ke 1 Value Column utama
-    import csv
-
-    value_col = getattr(getattr(spec, "data_binding", None), "value_col", None) or "value"
-    time_col = getattr(getattr(spec, "data_binding", None), "time_col", None) or "time"
-
-    def _resolve_headers(headers, target, candidates):
-        if target in headers: return target
-        lower = {h.lower(): h for h in headers}
-        for c in candidates:
-            if c in headers: return c
-            if c.lower() in lower: return lower[c.lower()]
-        return target
-
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
-
-        time_col = _resolve_headers(headers, time_col, ["date", "year", "month", "day", "time", "t"])
-        value_col = _resolve_headers(headers, value_col, ["close", "price", "amount", "total", "count", "value"])
-
-        raw_data = [] # (time_str, value_float)
-        for row in reader:
-            t = (row.get(time_col) or "").strip()
-            v_str = (row.get(value_col) or "").strip()
-            if not t or not v_str: continue
-            try:
-                v = float(v_str)
-                raw_data.append((t, v))
-            except:
-                continue
-
-    if not raw_data:
-        raise ValueError("No valid data found for Line Chart.")
-
-    # Sort by Time (Simple parsing)
-    # Untuk production level, sebaiknya pakai library `dateutil` untuk parse tanggal beneran.
-    # Di sini kita asumsikan urutan CSV sudah benar atau formatnya sortable.
-    # raw_data.sort(key=lambda x: x[0]) # Optional jika data belum urut
-
-    times = [x[0] for x in raw_data]
-    values = [x[1] for x in raw_data]
-
-    # --- 2. VISUAL SCALING LOGIC ---
-    min_val = min(values)
-    max_val = max(values)
-
-    # Padding Y-Axis (Penting biar gak nempel atap)
-    y_range = max_val - min_val
-    if y_range == 0: y_range = 1.0
-    y_min = min_val - (y_range * 0.1) # Bawah longgar dikit
-    y_max = max_val + (y_range * 0.2) # Atas longgar banyak buat Label
-
-    # Config Colors
-    theme_color = "#00E5FF" # Cyan Neon
-
-    # Embed Literals
-    lit_times = _format_literal(times)
-    lit_values = _format_literal(values)
-
-    code = f'''
-from manim import *
-import numpy as np
-
-TIMES = {lit_times}
-VALUES = {lit_values}
-Y_MIN = {y_min}
-Y_MAX = {y_max}
-COLOR_THEME = "{theme_color}"
-
-class GenScene(Scene):
-    def construct(self):
-        # 1. SETUP AXES
-        # X Axis = Index data (0 sampai len-1)
-        # Y Axis = Value
-        x_len = len(TIMES)
-
-        axes = Axes(
-            x_range=[0, x_len - 1, max(1, x_len // 5)], # Step biar gak penuh
-            y_range=[Y_MIN, Y_MAX, (Y_MAX - Y_MIN) / 5],
-            x_length=10,
-            y_length=6,
-            axis_config={{"color": GREY, "include_numbers": True, "font_size": 16}},
-            tips=False
-        )
-
-        # Hapus X-Axis Numbers default karena kita mau custom Label Tanggal
-        axes.x_axis.set_opacity(0) # Hide default line if needed, or just hide numbers
-
-        # Custom X Labels (Tampilkan awal, tengah, akhir saja biar rapi)
-        x_labels = VGroup()
-        indices_to_show = [0, x_len // 2, x_len - 1]
-        for i in indices_to_show:
-            if i < x_len:
-                lbl = Text(str(TIMES[i]), font_size=16, color=GREY_B)
-                lbl.next_to(axes.c2p(i, Y_MIN), DOWN)
-                x_labels.add(lbl)
-
-        self.add(axes, x_labels)
-
-        # 2. CREATE THE LINE (VMobject)
-        # Kita buat path penuh dulu, nanti kita animate creation-nya
-        line_path = VMobject()
-        line_path.set_points_smoothly([axes.c2p(i, val) for i, val in enumerate(VALUES)])
-        line_path.set_color(COLOR_THEME)
-        line_path.set_stroke(width=4)
-
-        # Area under curve (Optional aesthetic)
-        # Trik: Buat polygon dari titik line + titik bawah axes
-        area_points = [axes.c2p(i, val) for i, val in enumerate(VALUES)]
-        area_points.append(axes.c2p(x_len-1, Y_MIN)) # Kanan Bawah
-        area_points.append(axes.c2p(0, Y_MIN))       # Kiri Bawah
-
-        area = Polygon(*area_points)
-        area.set_stroke(width=0)
-        area.set_fill(COLOR_THEME, opacity=0.2)
-
-        # 3. THE GLOWING DOT & LABEL (Follower)
-        dot = Dot(color=WHITE, radius=0.08)
-        dot.move_to(axes.c2p(0, VALUES[0]))
-
-        # Glow Effect (Lingkaran transparan besar di sekitar dot)
-        glow = Dot(color=COLOR_THEME, radius=0.2).set_opacity(0.4)
-        glow.add_updater(lambda m: m.move_to(dot.get_center()))
-
-        # Value Label (Follows the dot)
-        val_label = DecimalNumber(VALUES[0], num_decimal_places=1, font_size=24, color=WHITE)
-        val_label.add_background_rectangle()
-        val_label.add_updater(lambda m: m.next_to(dot, UP, buff=0.2))
-
-        # 4. ANIMATION
-        # Kita gunakan Create(line) tapi kita butuh Dot mengikuti ujungnya.
-        # Cara termudah di Manim untuk sinkronisasi: ValueTracker
-
-        tracker = ValueTracker(0)
-
-        # Updater untuk Dot agar menempel di kurva berdasarkan progress tracker
-        def update_dot(mob):
-            t_idx = tracker.get_value()
-            # Interpolasi posisi (karena tracker float, misal 1.5 berarti antara index 1 dan 2)
-            # Tapi karena kita pakai set_points_smoothly, curve sudah continuous.
-            # Kita ambil point dari curve function:
-            point = line_path.point_from_proportion(t_idx / (x_len - 1))
-            mob.move_to(point)
-
-        # Updater untuk Label Angka
-        def update_val_label(mob):
-            t_idx = tracker.get_value()
-            idx = int(round(t_idx))
-            idx = min(idx, x_len - 1)
-            mob.set_value(VALUES[idx])
-
-        dot.add_updater(update_dot)
-        val_label.add_updater(update_val_label)
-
-        # Trik animasi: Create line dan FadeIn area
-        self.play(FadeIn(dot), FadeIn(glow), FadeIn(val_label))
-
-        # Kita animasikan Line muncul dari kiri ke kanan berbarengan dengan Tracker
-        self.play(
-            Create(line_path, rate_func=linear),
-            FadeIn(area, rate_func=linear), # Area muncul pelan2
-            tracker.animate.set_value(x_len - 1),
-            run_time=6,
-            rate_func=linear
-        )
-
-        self.wait(2)
-
-'''
-    return code.strip()
+    # Use the new modern line evolution template
+    from agents.tools.templates.line_evolution import generate_line_evolution
+    return generate_line_evolution(spec, csv_path, theme="youtube_dark")
 
 
-def generate_bento_grid_code(spec: object, csv_path: str) -> str:
+def generate_bento_grid_code(spec: object, csv_path: str, use_modern: bool = True) -> str:
     """
     Generate a 'Bento Grid' KPI Dashboard.
     Best for: Snapshot data, summary statistics, or small datasets (< 10 items).
+
+    This function now delegates to the new modern template in
+    agents.tools.templates.bento_grid for better visual output with:
+    - Glassmorphism card design with subtle gradients
+    - Animated counting numbers with K/M/B formatting
+    - Optional change indicators (up/down arrows with percentages)
+    - Flexible grid layouts (auto or manual)
+    - Modern color palette and theming
+
+    Args:
+        spec: ChartSpec with data_binding filled.
+        csv_path: Path to the dataset CSV.
+        use_modern: If True (default), use the new modern template. Set False for legacy behavior.
+
+    Returns:
+        str: Python code suitable for Manim CLI (contains `class GenScene(Scene)`).
     """
+    # Use the new modern bento grid template by default
+    if use_modern:
+        from agents.tools.templates.bento_grid import generate_bento_grid
+        return generate_bento_grid(spec, csv_path, theme="youtube_dark")
+
+    # Legacy implementation below (kept for backwards compatibility)
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
@@ -1363,3 +842,86 @@ class GenScene(Scene):
 
 '''
     return code.strip()
+
+
+def generate_count_bar_code(spec: object, csv_path: str, count_column: str = None, top_n: int = 15) -> str:
+    """
+    Generate a 'Count Bar Chart' for categorical-only datasets.
+
+    Converts categorical data to counts and creates an animated horizontal bar chart
+    with staggered growth animation. Perfect for datasets that have no numeric columns
+    but contain categorical values that can be counted.
+
+    This function delegates to the count_bar template with:
+    - Horizontal bar chart with animated growth
+    - Staggered entrance animation for visual interest
+    - Value labels at the end of each bar
+    - Clean, modern styling using the current color palette
+    - Auto-sorted by count (descending) for visual hierarchy
+
+    Args:
+        spec: ChartSpec with data_binding filled.
+        csv_path: Path to the dataset CSV.
+        count_column: Column to count occurrences of (None = auto-detect).
+        top_n: Maximum number of categories to show (default 15).
+
+    Returns:
+        str: Python code suitable for Manim CLI (contains `class GenScene(Scene)`).
+    """
+    from agents.tools.templates.count_bar import generate_count_bar
+    return generate_count_bar(
+        spec,
+        csv_path,
+        count_column=count_column,
+        top_n=top_n,
+        theme="youtube_dark",
+        include_intro=True,
+        include_conclusion=True,
+    )
+
+
+def generate_single_numeric_code(
+    spec: object,
+    csv_path: str,
+    category_column: str = None,
+    value_column: str = None,
+    top_n: int = 15,
+    sort_descending: bool = True,
+) -> str:
+    """
+    Generate a 'Single Numeric Bar Chart' for datasets with one numeric column.
+
+    Creates an animated horizontal bar chart showing actual values per category.
+    Perfect for datasets with one categorical column and one numeric column
+    (e.g., revenue by product, population by country).
+
+    This function delegates to the single_numeric template with:
+    - Horizontal bar chart with animated growth
+    - Staggered entrance animation for visual interest
+    - Value labels at the end of each bar with K/M/B formatting
+    - Clean, modern styling using the current color palette
+    - Optional sorting by value (descending)
+
+    Args:
+        spec: ChartSpec with data_binding filled.
+        csv_path: Path to the dataset CSV.
+        category_column: Column for categories (None = auto-detect).
+        value_column: Column for numeric values (None = auto-detect).
+        top_n: Maximum number of categories to show (default 15).
+        sort_descending: Whether to sort by value descending (default True).
+
+    Returns:
+        str: Python code suitable for Manim CLI (contains `class GenScene(Scene)`).
+    """
+    from agents.tools.templates.single_numeric import generate_single_numeric
+    return generate_single_numeric(
+        spec,
+        csv_path,
+        category_column=category_column,
+        value_column=value_column,
+        top_n=top_n,
+        sort_descending=sort_descending,
+        theme="youtube_dark",
+        include_intro=True,
+        include_conclusion=True,
+    )

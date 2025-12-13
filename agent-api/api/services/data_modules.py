@@ -25,6 +25,12 @@ try:
 except ImportError:  # Lightweight fallback if pandas is absent
     pd = None  # type: ignore
 
+import csv
+import logging
+
+# Setup logging
+_logger = logging.getLogger("data_modules")
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -70,6 +76,168 @@ def _headers_sequential_numeric(headers: Sequence[str]) -> bool:
             return False
     # Check monotonic non-decreasing sequence
     return all(b >= a for a, b in zip(numeric_indices, numeric_indices[1:]))
+
+
+def detect_header_row(filepath: str, max_rows_to_check: int = 10) -> int:
+    """
+    Detect the actual header row in a CSV file.
+
+    World Bank and similar data sources often have metadata rows before
+    the actual data table:
+
+        "Data Source","World Development Indicators",
+        "Last Updated Date","2025-...",
+        <blank line>
+        "Country Name","Country Code","Indicator Name",...,1960,1961,...
+        "Afghanistan","AFG","Inflation...",...
+
+    This function scans the first few rows to find where the real data starts
+    by looking for:
+    1. A row with significantly more columns than previous rows
+    2. A row containing year-like column headers (1960, 1970, etc.)
+    3. A row containing common data column names (Country, Name, Code, etc.)
+
+    Args:
+        filepath: Path to the CSV file
+        max_rows_to_check: Maximum number of rows to scan
+
+    Returns:
+        0-based index of the header row (0 if no special header detected)
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            # Read first N rows
+            rows = []
+            reader = csv.reader(f)
+            for i, row in enumerate(reader):
+                if i >= max_rows_to_check:
+                    break
+                rows.append(row)
+
+        if not rows:
+            return 0
+
+        # Patterns indicating a data header row
+        header_patterns = [
+            r'country', r'name', r'code', r'indicator', r'region',
+            r'year', r'date', r'value', r'series', r'id',
+        ]
+        year_pattern = re.compile(r'^(19|20)\d{2}$')  # Years like 1960, 2023
+
+        best_row = 0
+        best_score = 0
+        max_cols = 0
+
+        for i, row in enumerate(rows):
+            col_count = len([c for c in row if c.strip()])  # Non-empty columns
+            score = 0
+
+            # Score: more columns than previous rows (data tables are wider)
+            if col_count > max_cols * 1.5 and col_count >= 4:
+                score += 3
+            max_cols = max(max_cols, col_count)
+
+            # Score: contains year columns
+            year_cols = sum(1 for c in row if year_pattern.match(str(c).strip()))
+            if year_cols >= 3:
+                score += 5
+
+            # Score: contains header-like column names
+            header_matches = sum(
+                1 for c in row
+                if any(re.search(p, str(c).lower()) for p in header_patterns)
+            )
+            if header_matches >= 2:
+                score += 3
+
+            # Score: row has many columns (at least 5)
+            if col_count >= 5:
+                score += 1
+
+            if score > best_score:
+                best_score = score
+                best_row = i
+
+        if best_score >= 3:
+            _logger.debug(f"[data_modules] Detected header row {best_row} with score {best_score}")
+            return best_row
+
+        return 0
+
+    except Exception as e:
+        _logger.warning(f"[data_modules] Header detection failed: {e}")
+        return 0
+
+
+def resolve_csv_path(csv_path: str) -> str:
+    """
+    Resolve a CSV path that may be a /static/... URL to its filesystem path.
+
+    This handles the common case where the frontend sends paths like:
+        /static/datasets/dataset_xxx/file.csv
+
+    But the actual file is at:
+        <cwd>/artifacts/datasets/dataset_xxx/file.csv
+
+    Args:
+        csv_path: Path that might be a /static/... URL or filesystem path
+
+    Returns:
+        Resolved filesystem path
+    """
+    import os
+    if csv_path.startswith("/static/"):
+        artifacts_root = os.path.join(os.getcwd(), "artifacts")
+        rel_inside = csv_path[len("/static/"):].lstrip("/")
+        fs_candidate = os.path.join(artifacts_root, rel_inside)
+        if os.path.exists(fs_candidate):
+            return fs_candidate
+    return csv_path
+
+
+def read_csv_smart(filepath: str, nrows: Optional[int] = None, **kwargs) -> Any:
+    """
+    Read a CSV file with smart header detection.
+
+    Handles World Bank and similar formats that have metadata rows before
+    the actual data table.
+
+    Args:
+        filepath: Path to the CSV file (can be /static/... URL or filesystem path)
+        nrows: Number of rows to read (None for all)
+        **kwargs: Additional arguments passed to pd.read_csv
+
+    Returns:
+        pandas DataFrame with data properly parsed
+    """
+    if pd is None:
+        raise RuntimeError("pandas is required for CSV reading")
+
+    # Resolve path if needed
+    resolved_path = resolve_csv_path(filepath)
+
+    # Detect header row
+    header_row = detect_header_row(resolved_path)
+
+    # Read with detected header
+    # IMPORTANT: Use skip_blank_lines=False to match the row indexing from csv.reader
+    # which counts all rows including blank ones. Without this, pandas skips blank lines
+    # and the header_row index becomes incorrect (off by number of blank lines skipped).
+    read_kwargs = {"header": header_row, "skip_blank_lines": False, **kwargs}
+    if nrows is not None:
+        read_kwargs["nrows"] = nrows
+
+    try:
+        # Use utf-8-sig encoding to automatically handle BOM (Byte Order Mark)
+        # which is common in World Bank and Excel-exported CSVs
+        df = pd.read_csv(resolved_path, encoding='utf-8-sig', **read_kwargs)
+        _logger.debug(f"[data_modules] Read CSV with header_row={header_row}, shape={df.shape}")
+        return df
+    except UnicodeDecodeError:
+        # Try latin-1 encoding as fallback
+        df = pd.read_csv(resolved_path, encoding='latin-1', **read_kwargs)
+        _logger.debug(f"[data_modules] Read CSV with latin-1 encoding, shape={df.shape}")
+        return df
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +299,188 @@ class AnomalyFlagResult:
     report: AnomalyReport
     anomaly_col: str
     clamped_col: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Data Validation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DataValidationResult:
+    """Result of validating a dataset for animation suitability."""
+    is_valid: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    suggestions: List[str] = field(default_factory=list)
+    numeric_columns: List[str] = field(default_factory=list)
+    categorical_columns: List[str] = field(default_factory=list)
+    potential_time_column: Optional[str] = None
+    potential_group_column: Optional[str] = None
+    row_count: int = 0
+    column_count: int = 0
+
+    def to_user_message(self) -> str:
+        """Generate a user-friendly message explaining validation results."""
+        if self.is_valid:
+            return "Dataset is valid for animation."
+
+        parts = ["**Dataset Validation Failed**\n"]
+
+        if self.errors:
+            parts.append("**Issues found:**")
+            for err in self.errors:
+                parts.append(f"  • {err}")
+            parts.append("")
+
+        if self.suggestions:
+            parts.append("**How to fix:**")
+            for sug in self.suggestions:
+                parts.append(f"  • {sug}")
+            parts.append("")
+
+        if self.warnings:
+            parts.append("**Warnings:**")
+            for warn in self.warnings:
+                parts.append(f"  • {warn}")
+
+        return "\n".join(parts)
+
+
+def validate_for_animation(df, filename: Optional[str] = None) -> DataValidationResult:
+    """
+    Validate a DataFrame for animation suitability.
+
+    Checks:
+    1. Has at least one numeric column (required for most animations)
+    2. Has enough rows (at least 2)
+    3. Has a potential group/entity column
+    4. Has a potential time column (optional but recommended)
+
+    Returns DataValidationResult with detailed feedback.
+    """
+    if pd is None:
+        return DataValidationResult(
+            is_valid=False,
+            errors=["pandas is not available"],
+        )
+
+    errors: List[str] = []
+    warnings: List[str] = []
+    suggestions: List[str] = []
+
+    row_count = len(df)
+    column_count = len(df.columns)
+
+    # Check row count
+    if row_count == 0:
+        errors.append("Dataset is empty (0 rows)")
+        suggestions.append("Upload a CSV file with data rows")
+    elif row_count < 2:
+        errors.append(f"Dataset has only {row_count} row(s) - need at least 2 for animation")
+        suggestions.append("Add more data rows to your CSV")
+
+    # Check column count
+    if column_count == 0:
+        errors.append("Dataset has no columns")
+        return DataValidationResult(
+            is_valid=False,
+            errors=errors,
+            suggestions=["Upload a valid CSV file with headers"],
+            row_count=row_count,
+            column_count=column_count,
+        )
+
+    # Identify numeric and categorical columns
+    numeric_cols: List[str] = []
+    categorical_cols: List[str] = []
+
+    for col in df.columns:
+        # Try to convert to numeric
+        numeric_count = pd.to_numeric(df[col], errors='coerce').notna().sum()
+        total_non_null = df[col].notna().sum()
+
+        if total_non_null > 0 and numeric_count / total_non_null >= 0.5:
+            numeric_cols.append(col)
+        else:
+            categorical_cols.append(col)
+
+    # Check for numeric columns
+    if not numeric_cols:
+        errors.append("No numeric columns found - animations require numeric values to visualize")
+        suggestions.append("Add a column with numeric values (e.g., population, sales, count, percentage)")
+        suggestions.append(f"Current columns are all text/categorical: {', '.join(df.columns[:5])}" +
+                          ("..." if len(df.columns) > 5 else ""))
+
+    # Identify potential time column
+    time_col: Optional[str] = None
+    time_patterns = ['year', 'date', 'time', 'month', 'day', 'period', 'quarter']
+
+    for col in df.columns:
+        col_lower = col.lower()
+        # Check name patterns
+        if any(p in col_lower for p in time_patterns):
+            time_col = col
+            break
+        # Check if column looks like years (4-digit numbers between 1900-2100)
+        if col in numeric_cols:
+            sample = df[col].dropna().head(10)
+            if len(sample) > 0:
+                try:
+                    vals = pd.to_numeric(sample, errors='coerce').dropna()
+                    if len(vals) > 0 and vals.between(1900, 2100).all():
+                        time_col = col
+                        break
+                except Exception:
+                    pass
+
+    if not time_col and numeric_cols:
+        warnings.append("No time/date column detected - some animations (bar race, line evolution) work best with time data")
+        suggestions.append("Consider adding a 'year', 'date', or 'time' column for time-series animations")
+
+    # Identify potential group column
+    group_col: Optional[str] = None
+    group_patterns = ['name', 'country', 'region', 'category', 'group', 'entity', 'id', 'label']
+
+    for col in categorical_cols:
+        col_lower = col.lower()
+        if any(p in col_lower for p in group_patterns):
+            group_col = col
+            break
+
+    # If no pattern match, use first categorical column with reasonable cardinality
+    if not group_col and categorical_cols:
+        for col in categorical_cols:
+            unique_count = df[col].nunique()
+            if 2 <= unique_count <= 100:  # Reasonable number of groups for visualization
+                group_col = col
+                break
+
+    if not group_col and categorical_cols:
+        group_col = categorical_cols[0]  # Fallback to first categorical
+
+    if not group_col and not categorical_cols:
+        warnings.append("No categorical/group column found - animations typically group data by category (e.g., country, product)")
+
+    # Additional data quality checks
+    if row_count > 0 and column_count > 0:
+        null_pct = df.isnull().sum().sum() / (row_count * column_count)
+        if null_pct > 0.5:
+            warnings.append(f"High percentage of missing values ({null_pct:.0%}) - this may affect visualization quality")
+
+    is_valid = len(errors) == 0
+
+    return DataValidationResult(
+        is_valid=is_valid,
+        errors=errors,
+        warnings=warnings,
+        suggestions=suggestions,
+        numeric_columns=numeric_cols,
+        categorical_columns=categorical_cols,
+        potential_time_column=time_col,
+        potential_group_column=group_col,
+        row_count=row_count,
+        column_count=column_count,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -622,8 +972,28 @@ def preprocess_dataset(
     value_col = transform_res.value_col or (
         working_df.select_dtypes("number").columns[0]
         if len(working_df.select_dtypes("number").columns) > 0
-        else working_df.columns[-1]
+        else None
     )
+
+    # If no numeric column found, skip anomaly flagging and scaling
+    if value_col is None:
+        return {
+            "data": working_df,
+            "detection": detection,
+            "transform": transform_res,
+            "anomalies": None,
+            "scaling": None,
+            "columns": {
+                "group": group_col,
+                "time": time_col,
+                "value": None,
+                "normalized": None,
+                "anomaly_flag": None,
+                "clamped_value": None,
+            },
+            "filename": filename,
+            "validation_error": "No numeric columns found - cannot perform anomaly detection or scaling",
+        }
 
     # Anomaly flagging
     anomaly_res = anomaly_flagger.flag(
@@ -653,6 +1023,77 @@ def preprocess_dataset(
     }
 
 
+# ---------------------------------------------------------------------------
+# Categorical Count Transformation
+# ---------------------------------------------------------------------------
+
+def transform_count_by_column(
+    df,
+    count_column: str,
+    output_path: Optional[str] = None,
+    top_n: int = 15,
+) -> Dict[str, Any]:
+    """
+    Transform a categorical dataset into a count aggregation.
+
+    This creates a new DataFrame (and optionally saves CSV) with columns: category, count
+    Sorted by count descending.
+
+    Args:
+        df: Input DataFrame
+        count_column: Column to count occurrences of
+        output_path: Optional path to save output CSV
+        top_n: Maximum categories to include
+
+    Returns:
+        Dictionary with:
+            'data': DataFrame with category and count columns
+            'categories': List of category names
+            'counts': List of count values
+            'max_count': Maximum count value
+            'total_items': Total number of items counted
+            'column_name': Name of the counted column
+            'output_path': Path to saved CSV (if output_path was provided)
+    """
+    if pd is None:
+        return {"error": "pandas not available"}
+
+    if count_column not in df.columns:
+        # Try case-insensitive match
+        col_map = {c.lower(): c for c in df.columns}
+        if count_column.lower() in col_map:
+            count_column = col_map[count_column.lower()]
+        else:
+            return {"error": f"Column '{count_column}' not found in DataFrame"}
+
+    # Count occurrences
+    counts = df[count_column].value_counts().head(top_n)
+
+    # Create result DataFrame
+    result_df = pd.DataFrame({
+        "category": counts.index.tolist(),
+        "count": counts.values.tolist(),
+    })
+
+    # Save to file if path provided
+    saved_path = None
+    if output_path:
+        import os
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        result_df.to_csv(output_path, index=False)
+        saved_path = output_path
+
+    return {
+        "data": result_df,
+        "categories": counts.index.tolist(),
+        "counts": counts.values.tolist(),
+        "max_count": int(counts.max()) if len(counts) > 0 else 0,
+        "total_items": int(df[count_column].notna().sum()),
+        "column_name": count_column,
+        "output_path": saved_path,
+    }
+
+
 __all__ = [
     "WideFormatDetector",
     "WideDetectionResult",
@@ -664,5 +1105,11 @@ __all__ = [
     "AnomalyFlagger",
     "AnomalyReport",
     "AnomalyFlagResult",
+    "DataValidationResult",
+    "validate_for_animation",
     "preprocess_dataset",
+    "transform_count_by_column",
+    "detect_header_row",
+    "resolve_csv_path",
+    "read_csv_smart",
 ]

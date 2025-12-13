@@ -44,6 +44,12 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query, Depends
 from pydantic import BaseModel, Field
 
+# Import analyze_schema for column type inference
+try:
+    from agents.tools.chart_inference import analyze_schema
+except ImportError:
+    analyze_schema = None
+
 from api.persistence.dataset_store import (
     persist_dataset,
     delete_dataset_row,
@@ -93,12 +99,23 @@ class DatasetMeta(BaseModel):
     sha256: Optional[str] = None
 
 
+class ColumnAnalysis(BaseModel):
+    """Analysis of a single column in the dataset."""
+    name: str = Field(..., description="Column name")
+    inferred_type: str = Field(..., description="Inferred type: 'numeric', 'categorical', or 'temporal'")
+    unique_count: int = Field(0, description="Number of unique values")
+    sample_values: List[str] = Field(default_factory=list, description="Sample values from this column")
+
+
 class DatasetListResponse(BaseModel):
     datasets: List[DatasetMeta]
 
 
 class UploadResponse(BaseModel):
     dataset: DatasetMeta
+    column_analysis: Optional[List[ColumnAnalysis]] = Field(
+        None, description="Analysis of each column (type, unique count, samples)"
+    )
 
 
 @router.get("", response_model=DatasetListResponse, status_code=status.HTTP_200_OK)
@@ -359,7 +376,16 @@ async def upload_dataset(
     except Exception:
         pass
 
-    return UploadResponse(dataset=meta)
+    # Analyze columns for type inference
+    column_analysis = None
+    if unified_path and os.path.exists(unified_path) and analyze_schema is not None:
+        try:
+            column_analysis = analyze_columns(unified_path)
+        except Exception:
+            # Non-critical: proceed without analysis
+            pass
+
+    return UploadResponse(dataset=meta, column_analysis=column_analysis)
 
 
 # -----------------------
@@ -392,6 +418,49 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def analyze_columns(csv_path: str) -> List[ColumnAnalysis]:
+    """
+    Analyze columns in a CSV file to determine types and sample values.
+    Uses chart_inference.analyze_schema for type detection.
+    """
+    import pandas as pd
+
+    if analyze_schema is None:
+        return []
+
+    try:
+        schema = analyze_schema(csv_path)
+    except Exception:
+        return []
+
+    # Read a small sample for sample values
+    try:
+        df = pd.read_csv(csv_path, nrows=100, encoding='utf-8-sig')
+    except Exception:
+        df = None
+
+    results: List[ColumnAnalysis] = []
+    for col in schema.columns:
+        col_type = schema.column_types.get(col, "categorical")
+        unique_count = schema.unique_counts.get(col, 0)
+
+        # Get sample values
+        sample_values: List[str] = []
+        if df is not None and col in df.columns:
+            # Get up to 5 unique non-null sample values
+            samples = df[col].dropna().unique()[:5]
+            sample_values = [str(s) for s in samples]
+
+        results.append(ColumnAnalysis(
+            name=col,
+            inferred_type=col_type,
+            unique_count=unique_count,
+            sample_values=sample_values
+        ))
+
+    return results
 
 
 def rel_url_for(abs_path: str) -> str:
@@ -469,12 +538,41 @@ def normalize_chart_type_hint(hint: Optional[str], columns: List[str]) -> Option
     if hint:
         return hint
     cols_lower = {c.lower() for c in columns}
+    num_coloumns = len(columns)
+
+    #chek is ther year coloumn in user send data
+    years_col = [c for c in columns if c.isdigit() and 1900 <= int(c) <= 2100]
+    has_years_columns = len(years_col) >= 2
+
     # Bubble heuristic
     if {"x", "y", "r", "time"}.issubset(cols_lower):
         return "bubble"
     # Distribution heuristic
     if {"value", "time"}.issubset(cols_lower):
         return "distribution"
+    return None
+
+    if has_years_columns and any(c.lower() in ("name", "entity","country", "label") for c in columns):
+        return "bar_race"
+
+    if {"date", "value"}.issubset(cols_lower) or {"time", "value"}.issubset(cols_lower):
+        if not any(c.lower() in ("entity", "name", "country", "group") for c in columns):
+            return "line_evolution"
+
+
+    numeric_keywords = {"value", "amount", "count", "total", "revenue", "sales", "price", "score"}
+    if len(cols_lower & numeric_keywords) >= 2:
+        return "bento_grid"
+
+    # 6. Single Numeric: one numeric column + one category column pattern
+    if num_columns == 2:
+        # Simple case: likely category + value
+        return "single_numeric"
+
+    # 7. Count Bar: no obvious numeric patterns, just categorical columns
+    # This is a fallback - count_bar works with pure categorical data
+    # But we can't reliably detect this from column names alone
+
     return None
 
 

@@ -6,11 +6,17 @@ from api.routes.playground import playground_router
 from api.routes.datasets import router as datasets_router
 from api.routes.auth import router as auth_router
 from api.routes.chat import router as chat_router
+from api.routes.templates import router as templates_router
+from api.routes.animations import router as animations_router
+from api.routes.admin import router as admin_router
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(health_router)
 v1_router.include_router(auth_router)
 v1_router.include_router(agents_router)
 v1_router.include_router(datasets_router)
+v1_router.include_router(templates_router)
+v1_router.include_router(animations_router)
 v1_router.include_router(playground_router)
 v1_router.include_router(chat_router)
+v1_router.include_router(admin_router)

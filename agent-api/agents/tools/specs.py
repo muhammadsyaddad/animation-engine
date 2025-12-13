@@ -5,10 +5,17 @@ This module defines a minimal schema to describe an animated chart specification
 for our Manim-based pipeline, along with a lightweight heuristic to infer a
 reasonable default spec from a natural language prompt.
 
+Updated to support all 5 chart types:
+- bubble: Multi-dimensional scatter with size encoding
+- distribution: Histogram/density plots
+- bar_race: Animated ranking bars over time
+- line_evolution: Line chart trends over time
+- bento_grid: Dashboard grid with KPIs
+
 Design goals:
 - Standard-library only (no external dependencies).
 - Conservative inference rules that produce stable defaults.
-- Compatible with Bubble and Distribution charts (Danim-style targets).
+- Compatible with all chart templates.
 
 Example:
     from agents.tools.specs import infer_spec_from_prompt
@@ -20,16 +27,15 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Optional, Literal
+from typing import Dict, Optional, Literal, Tuple
 import re
 
 
-# -----------------------------
-# Constants / simple palettes
-# -----------------------------
+# =============================================================================
+# CONSTANTS
+# =============================================================================
 
 # A simple, readable color palette for group mapping (web hex colors).
-# These mirror the spirit of Danim's group colors but expressed as hex.
 DEFAULT_GROUP_COLOR_MAP: Dict[str, str] = {
     "AFRICA": "#F44336",  # RED
     "ASIA": "#4CAF50",  # GREEN
@@ -38,13 +44,13 @@ DEFAULT_GROUP_COLOR_MAP: Dict[str, str] = {
     "OCEANIA": "#9C27B0",  # PURPLE
 }
 
-# Supported chart types for this module
-ChartType = Literal["bubble", "distribution", "bar_race", "line", "unknown"]
+# Supported chart types - now includes all 5 types
+ChartType = Literal["bubble", "distribution", "bar_race", "line_evolution", "bento_grid", "unknown"]
 
 
-# -----------------------------
-# Dataclasses (Spec Schema)
-# -----------------------------
+# =============================================================================
+# DATACLASSES (Spec Schema)
+# =============================================================================
 
 @dataclass
 class DataBinding:
@@ -64,6 +70,20 @@ class DataBinding:
       - time_col: temporal or discrete step
       - group_col: optional categorical
       - entity_col: optional identifier if relevant
+
+    For bar_race:
+      - value_col: numeric (value to rank by)
+      - time_col: temporal (for animation)
+      - entity_col: entities that compete/race
+
+    For line_evolution:
+      - value_col: numeric (y-axis value)
+      - time_col: temporal (x-axis)
+      - entity_col: series/lines to plot
+
+    For bento_grid:
+      - value_col: numeric (metric values)
+      - entity_col: metric names/labels
     """
     x_col: Optional[str] = None
     y_col: Optional[str] = None
@@ -77,7 +97,7 @@ class DataBinding:
 @dataclass
 class AxesSpec:
     """
-    Axes configuration, compatible with both bubble and distribution visualizations.
+    Axes configuration, compatible with all visualization types.
     """
     auto: bool = True
     x_min: Optional[float] = None
@@ -112,7 +132,7 @@ class TimingSpec:
     """
     total_time: float = 30.0
     creation_time: float = 2.0
-    transform_ratio: float = 0.3  # fraction of (total_time - creation_time) used for bubble/data transforms
+    transform_ratio: float = 0.3  # fraction of (total_time - creation_time) used for transforms
     lag_ratio: float = 0.3
     max_circles_per_batch: int = 60
 
@@ -123,10 +143,10 @@ class ChartSpec:
     Unified chart spec used by the animation pipeline.
 
     Fields:
-      - chart_type: "bubble" | "distribution" | "unknown"
+      - chart_type: "bubble" | "distribution" | "bar_race" | "line_evolution" | "bento_grid" | "unknown"
       - data_binding: column bindings
       - axes: axis config
-      - creation_mode: 1|2|3 (primarily for bubble charts; ignored for distribution)
+      - creation_mode: 1|2|3 (primarily for bubble charts)
         1: create everything at once
         2: create bubble one-by-one (random order)
         3: create bubble one-by-one grouped by color/group
@@ -144,22 +164,36 @@ class ChartSpec:
         return asdict(self)
 
 
-# -----------------------------
-# Inference helpers (regex)
-# -----------------------------
+# =============================================================================
+# REGEX PATTERNS FOR CHART TYPE DETECTION
+# =============================================================================
 
 _RE_BUBBLE = re.compile(
     r"(?:\bbubble\s*chart\b|\bbubblechart\b|\bbubble\b|\bgelembung\b|\bscatter\b|\bsebar\b)",
     re.IGNORECASE,
 )
+
 _RE_DISTRIBUTION = re.compile(
     r"(?:\bdistribution\b|\bdistribusi\b|\bhistogram\b|\bkde\b|\bdensity\b)",
     re.IGNORECASE,
 )
-_RE_LINE = re.compile(
-    r"(?:\bline\s*chart\b|\bline\b|\btime\s*series\b|\bseries\b)",
+
+_RE_BAR_RACE = re.compile(
+    r"(?:\bbar\s*race\b|\bracing\s*bar\b|\branking\b|\bperingkat\b|\btop\s*\d+\b|\bleaderboard\b)",
     re.IGNORECASE,
 )
+
+_RE_LINE_EVOLUTION = re.compile(
+    r"(?:\bline\s*chart\b|\bline\s*evolution\b|\bline\s*graph\b|\btrend\b|\btren\b|\btime\s*series\b|\bevolution\b|\bevolusi\b)",
+    re.IGNORECASE,
+)
+
+_RE_BENTO_GRID = re.compile(
+    r"(?:\bbento\b|\bdashboard\b|\bkpi\b|\bmetric\b|\boverview\b|\bsummary\b|\bringkasan\b)",
+    re.IGNORECASE,
+)
+
+# Creation mode patterns
 _RE_MODE1 = re.compile(r"(?:\bmode\s*1\b|\boption\s*1\b|\bdirect(ly)?\b|\blangsung\b)", re.IGNORECASE)
 _RE_MODE3 = re.compile(
     r"(?:\bmode\s*3\b|\boption\s*3\b|\b(group(ed)?|kelompok)\b|\bby\s*group\b)",
@@ -167,7 +201,7 @@ _RE_MODE3 = re.compile(
 )
 _RE_MODE2 = re.compile(r"(?:\bmode\s*2\b|\boption\s*2\b|\brandom\b)", re.IGNORECASE)
 
-# Common label tokens (ID/EN) to set default axis labels if the prompt suggests domain context.
+# Common label tokens (ID/EN) to set default axis labels
 _RE_LIFE_EXPECTANCY = re.compile(r"(life\s*expectancy|umur\s*harapan\s*hidup|人均寿命)", re.IGNORECASE)
 _RE_FERTILITY = re.compile(r"(fertilit(y|as)|生育率)", re.IGNORECASE)
 _RE_POPULATION = re.compile(r"(population|populasi|人口)", re.IGNORECASE)
@@ -175,22 +209,65 @@ _RE_YEAR = re.compile(r"(year|tahun|年)", re.IGNORECASE)
 _RE_REGION = re.compile(r"(region|wilayah|区域|area|benua)", re.IGNORECASE)
 
 
+# =============================================================================
+# INFERENCE FUNCTIONS
+# =============================================================================
+
 def normalize_chart_type(text: Optional[str]) -> ChartType:
     """
     Infer chart type from prompt text.
+    Now supports all 5 chart types.
     """
     t = text or ""
-    is_bubble = bool(_RE_BUBBLE.search(t))
-    is_dist = bool(_RE_DISTRIBUTION.search(t))
-    is_line = bool(_RE_LINE.search(t))
-    # Prefer a single unambiguous match; otherwise return unknown and let dataset drive selection.
-    if is_bubble and not (is_dist or is_line):
-        return "bubble"
-    if is_line and not (is_bubble or is_dist):
-        return "line"
-    if is_dist and not (is_bubble or is_line):
-        return "distribution"
+
+    matches = {
+        "bubble": bool(_RE_BUBBLE.search(t)),
+        "distribution": bool(_RE_DISTRIBUTION.search(t)),
+        "bar_race": bool(_RE_BAR_RACE.search(t)),
+        "line_evolution": bool(_RE_LINE_EVOLUTION.search(t)),
+        "bento_grid": bool(_RE_BENTO_GRID.search(t)),
+    }
+
+    # Count how many chart types matched
+    matched_types = [k for k, v in matches.items() if v]
+
+    # If exactly one type matched, return it
+    if len(matched_types) == 1:
+        return matched_types[0]
+
+    # If multiple matched, prefer based on priority
+    # (bar_race and line_evolution are most common requests)
+    priority = ["bar_race", "line_evolution", "bubble", "distribution", "bento_grid"]
+    for chart_type in priority:
+        if matches[chart_type]:
+            return chart_type
+
     return "unknown"
+
+
+def normalize_chart_type_with_data(
+    text: Optional[str],
+    csv_path: Optional[str] = None,
+) -> ChartType:
+    """
+    Infer chart type using both prompt text AND data analysis.
+    This is the preferred function when you have a CSV path.
+    """
+    # First try keyword-based detection
+    keyword_result = normalize_chart_type(text)
+
+    # If we have a CSV and keyword result is unknown, try data analysis
+    if csv_path and keyword_result == "unknown":
+        try:
+            from agents.tools.chart_inference import get_best_chart
+
+            best = get_best_chart(csv_path, text, min_confidence="medium")
+            if best:
+                return best.chart_type
+        except Exception:
+            pass  # Fall back to keyword result
+
+    return keyword_result
 
 
 def infer_creation_mode(text: Optional[str]) -> int:
@@ -210,7 +287,7 @@ def infer_creation_mode(text: Optional[str]) -> int:
     return 2
 
 
-def infer_axis_labels(text: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+def infer_axis_labels(text: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """
     Very lightweight inference for axis labels (bubble charts).
     If the prompt references known domains (life expectancy, fertility), use them.
@@ -231,8 +308,8 @@ def infer_axis_labels(text: Optional[str]) -> tuple[Optional[str], Optional[str]
 
 def default_binding_for_chart(chart_type: ChartType) -> DataBinding:
     """
-    Provide generic, reasonable default column names to guide the user/template.
-    These are only placeholders; actual ingestion/validation will verify the dataset.
+    Provide default column bindings for each chart type.
+    Updated to include all 5 chart types.
     """
     if chart_type == "bubble":
         return DataBinding(
@@ -243,39 +320,45 @@ def default_binding_for_chart(chart_type: ChartType) -> DataBinding:
             group_col="group",
             entity_col="entity",
         )
-    if chart_type == "distribution":
+    elif chart_type == "distribution":
         return DataBinding(
             value_col="value",
             time_col="time",
             group_col="group",
             entity_col="entity",
         )
-    if chart_type == "bar_race":
-        # Long-form preferred: time, category (as entity), value
+    elif chart_type == "bar_race":
         return DataBinding(
             value_col="value",
             time_col="time",
             group_col="group",
             entity_col="category",
         )
-    if chart_type == "line":
-        # Long-form preferred: time, series (as entity), value
+    elif chart_type == "line_evolution":
         return DataBinding(
             value_col="value",
             time_col="time",
             group_col="series",
-            entity_col="series",
+            entity_col="entity",
         )
-    # Unknown chart: set generic defaults to nudge user to map columns
-    return DataBinding(
-        x_col="x",
-        y_col="y",
-        r_col="r",
-        value_col="value",
-        time_col="time",
-        group_col="group",
-        entity_col="entity",
-    )
+    elif chart_type == "bento_grid":
+        return DataBinding(
+            value_col="value",
+            time_col=None,  # Bento grid typically doesn't need time
+            group_col="category",
+            entity_col="metric",
+        )
+    else:
+        # Unknown: provide generic defaults
+        return DataBinding(
+            x_col="x",
+            y_col="y",
+            r_col="r",
+            value_col="value",
+            time_col="time",
+            group_col="group",
+            entity_col="entity",
+        )
 
 
 def infer_style_language(text: Optional[str]) -> Optional[str]:
@@ -307,18 +390,32 @@ def build_default_spec(chart_type: ChartType) -> ChartSpec:
     return spec
 
 
-def infer_spec_from_prompt(prompt: Optional[str]) -> ChartSpec:
+def infer_spec_from_prompt(prompt: Optional[str], csv_path: Optional[str] = None) -> ChartSpec:
     """
     Main entry: infer a minimal ChartSpec from the natural language prompt.
-    - chart_type: bubble/distribution/unknown
-    - creation_mode (bubble): 1/2/3
-    - axes labels (optional)
-    - style language (optional)
-    - default bindings to guide downstream ingestion
+
+    Args:
+        prompt: User's natural language prompt
+        csv_path: Optional path to CSV for data-driven inference
+
+    Returns:
+        ChartSpec with inferred settings
+
+    Features:
+        - chart_type: bubble/distribution/bar_race/line_evolution/bento_grid/unknown
+        - creation_mode (bubble): 1/2/3
+        - axes labels (optional)
+        - style language (optional)
+        - default bindings to guide downstream ingestion
 
     Note: This does not validate any dataset; it only generates a spec skeleton.
     """
-    chart_type = normalize_chart_type(prompt)
+    # Use data-driven inference if CSV path provided
+    if csv_path:
+        chart_type = normalize_chart_type_with_data(prompt, csv_path)
+    else:
+        chart_type = normalize_chart_type(prompt)
+
     spec = build_default_spec(chart_type)
 
     # Infer creation mode for bubble charts
@@ -329,13 +426,12 @@ def infer_spec_from_prompt(prompt: Optional[str]) -> ChartSpec:
     x_label, y_label = infer_axis_labels(prompt)
     if x_label:
         spec.axes.x_label = x_label
-        # heuristic decimals for life expectancy
         spec.axes.x_decimals = 0
     if y_label:
         spec.axes.y_label = y_label
         spec.axes.y_decimals = 0
 
-    # Parse explicit column binding overrides from prompt (e.g., x_col=lifeExp, y_col="fertility")
+    # Parse explicit column binding overrides from prompt
     try:
         text = prompt or ""
         # Support quoted or unquoted values: x_col=lifeExp, x_col="lifeExp", x_col='lifeExp'
@@ -357,16 +453,25 @@ def infer_spec_from_prompt(prompt: Optional[str]) -> ChartSpec:
     return spec
 
 
+# =============================================================================
+# MODULE EXPORTS
+# =============================================================================
+
 __all__ = [
+    # Data structures
     "ChartSpec",
     "DataBinding",
     "AxesSpec",
     "StyleSpec",
     "TimingSpec",
     "ChartType",
+    # Main functions
     "infer_spec_from_prompt",
     "normalize_chart_type",
+    "normalize_chart_type_with_data",
     "infer_creation_mode",
     "default_binding_for_chart",
     "build_default_spec",
+    "infer_axis_labels",
+    "infer_style_language",
 ]

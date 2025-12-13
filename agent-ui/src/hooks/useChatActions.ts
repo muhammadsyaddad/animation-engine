@@ -75,11 +75,14 @@ const useChatActions = () => {
     setIsEndpointLoading(true)
     try {
       const status = await getStatus()
+      const enableTeams = process.env.NEXT_PUBLIC_ENABLE_TEAMS === 'true'
       let agents: AgentDetails[] = []
       let teams: TeamDetails[] = []
       if (status === 200) {
         setIsEndpointActive(true)
-        teams = await getTeams()
+        if (enableTeams) {
+          teams = await getTeams()
+        }
         agents = await getAgents()
         console.log(' is active', teams, agents)
 
