@@ -63,6 +63,9 @@ class AnimationContext:
         melted_dataset_path: Path to the melted/transformed dataset if applicable
         user_preferences: Any additional user preferences as a dict
         last_intent_message: The last message that indicated animation intent
+        pending_template_suggestions: List of template suggestions awaiting user selection
+        pending_run_id: The run_id that is awaiting template selection
+        pending_original_message: The original message that triggered the animation intent
         created_at: Timestamp when the context was first created
         updated_at: Timestamp when the context was last updated
         expires_at: Timestamp when the context should expire
@@ -77,6 +80,9 @@ class AnimationContext:
     melted_dataset_path: Optional[str] = None
     user_preferences: Dict[str, Any] = field(default_factory=dict)
     last_intent_message: Optional[str] = None
+    pending_template_suggestions: List[Dict[str, Any]] = field(default_factory=list)
+    pending_run_id: Optional[str] = None
+    pending_original_message: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     expires_at: float = field(default_factory=lambda: time.time() + DEFAULT_TTL_SECONDS)
@@ -97,6 +103,17 @@ class AnimationContext:
     def get_effective_csv_path(self) -> Optional[str]:
         """Get the best available dataset path (prefer melted if available)."""
         return self.melted_dataset_path or self.csv_path
+
+    def has_pending_template_selection(self) -> bool:
+        """Check if there's a pending template selection waiting for user input."""
+        return bool(self.pending_run_id and self.pending_template_suggestions)
+
+    def clear_pending_template_selection(self) -> None:
+        """Clear pending template selection state."""
+        self.pending_template_suggestions = []
+        self.pending_run_id = None
+        self.pending_original_message = None
+        self.updated_at = time.time()
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -195,6 +212,9 @@ def update_session_context(
     melted_dataset_path: Optional[str] = None,
     user_preferences: Optional[Dict[str, Any]] = None,
     last_intent_message: Optional[str] = None,
+    pending_template_suggestions: Optional[List[Dict[str, Any]]] = None,
+    pending_run_id: Optional[str] = None,
+    pending_original_message: Optional[str] = None,
     ttl_seconds: float = DEFAULT_TTL_SECONDS,
 ) -> Optional[AnimationContext]:
     """
@@ -241,6 +261,9 @@ def update_session_context(
                 melted_dataset_path=melted_dataset_path,
                 user_preferences=user_preferences or {},
                 last_intent_message=last_intent_message,
+                pending_template_suggestions=pending_template_suggestions or [],
+                pending_run_id=pending_run_id,
+                pending_original_message=pending_original_message,
             )
             ctx.refresh_ttl(ttl_seconds)
             _context_store[session_id] = ctx
@@ -258,6 +281,9 @@ def update_session_context(
                 melted_dataset_path=melted_dataset_path,
                 user_preferences=user_preferences,
                 last_intent_message=last_intent_message,
+                pending_template_suggestions=pending_template_suggestions,
+                pending_run_id=pending_run_id,
+                pending_original_message=pending_original_message,
             )
             ctx.refresh_ttl(ttl_seconds)
             logger.debug("Updated session context for %s", session_id)
