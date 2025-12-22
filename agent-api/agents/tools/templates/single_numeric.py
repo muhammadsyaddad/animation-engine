@@ -37,9 +37,13 @@ Usage:
 from __future__ import annotations
 
 import csv
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.templates.single_numeric")
 
 # Import primitives
 from agents.tools.primitives.elements import (
@@ -79,6 +83,19 @@ except ImportError:
     DEFAULT_THEME = None
     get_theme = lambda x: None
     get_palette_by_name = lambda x: None
+
+# CSV utilities (header detection + row reader)
+# use try/except so that template module import won't hard-fail if csv_utils
+# has an unrelated runtime/import issue — callers will see a descriptive error.
+try:
+    from agents.tools.templates.csv_utils import read_csv_rows, detect_header_row
+except Exception:
+    # Provide safe fallback stubs to produce clearer runtime errors if used.
+    def read_csv_rows(csv_path: str, max_rows=None, detect_header: bool = True):
+        raise RuntimeError("csv_utils.read_csv_rows not available")
+
+    def detect_header_row(filepath: str, max_row_to_check: int = 10) -> int:
+        return 0
 
 
 # =============================================================================
@@ -236,20 +253,23 @@ def parse_csv_data(
     Returns:
         SingleNumericData with processed animation data
     """
+    logger.info(f"[SINGLE_NUMERIC] parse_csv_data started | csv_path={csv_path} | category_column={category_column} | value_column={value_column} | top_n={top_n}")
+
     if not os.path.exists(csv_path):
+        logger.error(f"[SINGLE_NUMERIC] Dataset not found: {csv_path}")
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
+    logger.info(f"[SINGLE_NUMERIC] CSV headers detected: {headers}")
 
-        if not headers:
-            raise ValueError("CSV file has no headers")
+    if not headers:
+        logger.error(f"[SINGLE_NUMERIC] CSV file has no headers")
+        raise ValueError("CSV file has no headers")
 
-        # Read all rows for analysis
-        rows = list(reader)
+    logger.debug(f"[SINGLE_NUMERIC] Read {len(rows)} rows from CSV")
 
     if not rows:
+        logger.error(f"[SINGLE_NUMERIC] CSV file has no data rows")
         raise ValueError("CSV file has no data rows")
 
     # Auto-detect value column if not provided
@@ -261,9 +281,14 @@ def parse_csv_data(
         )
     if not resolved_value_col:
         resolved_value_col = _find_numeric_column(headers, rows)
+        if resolved_value_col:
+            logger.info(f"[SINGLE_NUMERIC] Auto-detected numeric column: {resolved_value_col}")
 
     if not resolved_value_col:
+        logger.error(f"[SINGLE_NUMERIC] No numeric column found | headers={headers}")
         raise ValueError("No numeric column found in dataset")
+
+    logger.info(f"[SINGLE_NUMERIC] Using value column: {resolved_value_col}")
 
     # Auto-detect category column if not provided
     resolved_cat_col = None
@@ -280,10 +305,14 @@ def parse_csv_data(
         for h in headers:
             if h != resolved_value_col:
                 resolved_cat_col = h
+                logger.info(f"[SINGLE_NUMERIC] Fallback to first non-value column: {resolved_cat_col}")
                 break
 
     if not resolved_cat_col:
+        logger.error(f"[SINGLE_NUMERIC] No categorical column found | headers={headers} | value_col={resolved_value_col}")
         raise ValueError("No categorical column found in dataset")
+
+    logger.info(f"[SINGLE_NUMERIC] Using category column: {resolved_cat_col}")
 
     # Extract category-value pairs
     data_pairs: List[Tuple[str, float]] = []

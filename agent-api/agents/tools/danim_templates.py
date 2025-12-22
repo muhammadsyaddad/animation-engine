@@ -109,9 +109,7 @@ def _parse_bubble_dataset(csv_path: str, binding: DataBinding) -> Tuple[
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+        headers, rows = read_csv_rows(csv_path)
 
         x_col = binding.x_col or "x"
         y_col = binding.y_col or "y"
@@ -690,26 +688,24 @@ def generate_bento_grid_code(spec: object, csv_path: str, use_modern: bool = Tru
 
     items = [] # List of {'label': str, 'value': float}
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
 
-        # Smart Column Detection
-        label_col = _resolve_headers(headers, label_col, ["metric", "kpi", "category", "item", "name", "title", "label"])
-        value_col = _resolve_headers(headers, value_col, ["value", "amount", "total", "count", "number", "score"])
+    # Smart Column Detection
+    label_col = _resolve_headers(headers, label_col, ["metric", "kpi", "category", "item", "name", "title", "label"])
+    value_col = _resolve_headers(headers, value_col, ["value", "amount", "total", "count", "number", "score"])
 
-        for row in reader:
-            lbl = (row.get(label_col) or "").strip()
-            val_str = (row.get(value_col) or "").strip()
+    for row in rows:
+        lbl = (row.get(label_col) or "").strip()
+        val_str = (row.get(value_col) or "").strip()
 
-            if not lbl or not val_str: continue
-            try:
-                # Clean currency symbols or commas if simple
-                clean_val = val_str.replace(",", "").replace("$", "").replace("%", "")
-                val = float(clean_val)
-                items.append({"label": lbl, "value": val})
-            except:
-                continue
+        if not lbl or not val_str: continue
+        try:
+            # Clean currency symbols or commas if simple
+            clean_val = val_str.replace(",", "").replace("$", "").replace("%", "")
+            val = float(clean_val)
+            items.append({"label": lbl, "value": val})
+        except:
+            continue
 
     # --- 2. SAFETY LIMITS ---
     # Bento Grid paling bagus max 9 items (3x3). Lebih dari itu jadi kekecilan.

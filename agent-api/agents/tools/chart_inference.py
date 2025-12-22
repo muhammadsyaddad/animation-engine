@@ -445,26 +445,43 @@ def _is_temporal_column(col_name: str, series: "pd.Series") -> bool:
 
 def _detect_wide_format(df: "pd.DataFrame") -> Tuple[bool, List[str]]:
     """
-    Detect if data is in wide format (entity + year columns).
+    Detect if data is in wide format (entity + year/date columns as headers).
 
-    Wide format example:
-        Country, 2000, 2001, 2002, ...
-        USA,     100,  110,  120, ...
+    Wide format examples:
+        Country, 2000, 2001, 2002, ...           (year columns)
+        Country, Apr 10 2018, Apr 11 2018, ...   (date string columns)
+        Country, Q1 2020, Q2 2020, ...           (quarter columns)
 
-    Returns: (is_wide, year_columns)
+    Returns: (is_wide, time_columns)
     """
-    year_columns = []
+    time_columns = []
+
+    # Patterns for time-like column headers
+    # 1. Four-digit years: 2000, 2001, etc.
+    year_pattern = re.compile(r"^(19|20)\d{2}$")
+    # 2. Date strings: "Apr 10 2018", "May 1 2018", "Jan 15, 2020", etc.
+    date_string_pattern = re.compile(
+        r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+(19|20)\d{2}$",
+        re.IGNORECASE
+    )
+    # 3. ISO-like dates: "2018-04-10", "2020/01/15"
+    iso_date_pattern = re.compile(r"^(19|20)\d{2}[-/]\d{1,2}[-/]\d{1,2}$")
+    # 4. Quarter patterns: "Q1 2020", "Q2", "Q1-2020"
+    quarter_pattern = re.compile(r"^Q[1-4](\s+|-|_)?(19|20)?\d{2,4}?$", re.IGNORECASE)
 
     for col in df.columns:
         col_str = str(col).strip()
-        # Check if column name is a year (4 digits)
-        if re.match(r"^(19|20)\d{2}$", col_str):
-            year_columns.append(col)
+        # Check various time-like patterns
+        if (year_pattern.match(col_str) or
+            date_string_pattern.match(col_str) or
+            iso_date_pattern.match(col_str) or
+            quarter_pattern.match(col_str)):
+            time_columns.append(col)
 
-    # If we have multiple year columns, it's likely wide format
-    is_wide = len(year_columns) >= 3
+    # If we have multiple time columns, it's likely wide format
+    is_wide = len(time_columns) >= 3
 
-    return is_wide, year_columns
+    return is_wide, time_columns
 
 
 def analyze_schema(csv_path: str, sample_rows: int = 500) -> DataSchema:

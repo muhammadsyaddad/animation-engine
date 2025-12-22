@@ -7,6 +7,7 @@ import Videos from './Multimedia/Videos'
 import Audios from './Multimedia/Audios'
 import { memo } from 'react'
 import AgentThinkingLoader from './AgentThinkingLoader'
+import { TemplateSuggestionsCard } from '@/components/templates'
 
 interface MessageProps {
   message: ChatMessage
@@ -30,6 +31,18 @@ const AgentMessage = ({ message }: MessageProps) => {
     messageContent = (
       <div className="flex w-full flex-col gap-4">
         <MarkdownRenderer>{message.content}</MarkdownRenderer>
+        {/* Template suggestions for animation pipeline */}
+        {message.extra_data?.template_suggestions && (
+          <TemplateSuggestionsCard
+            suggestions={message.extra_data.template_suggestions.suggestions}
+            runId={message.extra_data.template_suggestions.run_id || ''}
+            sessionId={message.extra_data.template_suggestions.session_id}
+            message={message.extra_data.template_suggestions.message}
+            datasetSummary={
+              message.extra_data.template_suggestions.dataset_summary
+            }
+          />
+        )}
         {message.videos && message.videos.length > 0 && (
           <Videos videos={message.videos} />
         )}

@@ -186,12 +186,28 @@ def resolve_csv_path(csv_path: str) -> str:
         Resolved filesystem path
     """
     import os
+    import logging
+    logger = logging.getLogger("data_modules")
+
     if csv_path.startswith("/static/"):
         artifacts_root = os.path.join(os.getcwd(), "artifacts")
         rel_inside = csv_path[len("/static/"):].lstrip("/")
         fs_candidate = os.path.join(artifacts_root, rel_inside)
-        if os.path.exists(fs_candidate):
+        candidate_exists = os.path.exists(fs_candidate)
+
+        logger.info(f"[resolve_csv_path] Resolving static path | original={csv_path} | cwd={os.getcwd()} | artifacts_root={artifacts_root} | fs_candidate={fs_candidate} | exists={candidate_exists}")
+
+        if candidate_exists:
             return fs_candidate
+        else:
+            # Log directory contents for debugging
+            parent_dir = os.path.dirname(fs_candidate)
+            if os.path.exists(parent_dir):
+                dir_contents = os.listdir(parent_dir)
+                logger.warning(f"[resolve_csv_path] File not found but parent exists | parent={parent_dir} | contents={dir_contents[:10]}")
+            else:
+                logger.warning(f"[resolve_csv_path] Parent directory does not exist | parent={parent_dir}")
+
     return csv_path
 
 

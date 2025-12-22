@@ -248,13 +248,26 @@ def normalize_chart_type(text: Optional[str]) -> ChartType:
 def normalize_chart_type_with_data(
     text: Optional[str],
     csv_path: Optional[str] = None,
+    auto_select: bool = True,
 ) -> ChartType:
     """
     Infer chart type using both prompt text AND data analysis.
     This is the preferred function when you have a CSV path.
+
+    Args:
+        text: User's natural language prompt
+        csv_path: Optional path to CSV for data-driven inference
+        auto_select: If False, skip data-driven inference and return "unknown"
+                     to allow the pipeline to emit template suggestions instead.
+                     This respects the AUTO_SELECT_TEMPLATES setting.
     """
     # First try keyword-based detection
     keyword_result = normalize_chart_type(text)
+
+    # If auto_select is disabled and user didn't explicitly specify a chart type,
+    # return "unknown" to trigger the template suggestion flow
+    if not auto_select and keyword_result == "unknown":
+        return "unknown"
 
     # If we have a CSV and keyword result is unknown, try data analysis
     if csv_path and keyword_result == "unknown":
@@ -390,13 +403,20 @@ def build_default_spec(chart_type: ChartType) -> ChartSpec:
     return spec
 
 
-def infer_spec_from_prompt(prompt: Optional[str], csv_path: Optional[str] = None) -> ChartSpec:
+def infer_spec_from_prompt(
+    prompt: Optional[str],
+    csv_path: Optional[str] = None,
+    auto_select_templates: bool = True,
+) -> ChartSpec:
     """
     Main entry: infer a minimal ChartSpec from the natural language prompt.
 
     Args:
         prompt: User's natural language prompt
         csv_path: Optional path to CSV for data-driven inference
+        auto_select_templates: If False, skip data-driven chart type inference
+                               to allow the pipeline to emit template suggestions.
+                               This respects the AUTO_SELECT_TEMPLATES setting.
 
     Returns:
         ChartSpec with inferred settings
@@ -412,7 +432,7 @@ def infer_spec_from_prompt(prompt: Optional[str], csv_path: Optional[str] = None
     """
     # Use data-driven inference if CSV path provided
     if csv_path:
-        chart_type = normalize_chart_type_with_data(prompt, csv_path)
+        chart_type = normalize_chart_type_with_data(prompt, csv_path, auto_select=auto_select_templates)
     else:
         chart_type = normalize_chart_type(prompt)
 

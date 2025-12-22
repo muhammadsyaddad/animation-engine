@@ -67,6 +67,8 @@ _STRONG_ANIM_PATTERNS = [
     r"\banimasi\b",            # ID: animasi
     r"\banimasikan\b",         # ID: animasikan data
     r"\banimate\b",
+    r"\banimat[aei]\w*\b",     # Typo tolerance: animte, animtae, animta, animatie, etc.
+    r"\banima[t]+e\b",         # Typo tolerance: animatte, animattte
     r"\banimation\b",
     r"\banimating\b",
     r"\banimated\b",

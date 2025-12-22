@@ -30,9 +30,13 @@ Usage:
 from __future__ import annotations
 
 import csv
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.templates.bar_race")
 
 # Import primitives
 from agents.tools.primitives.elements import (
@@ -184,7 +188,10 @@ def parse_csv_data(
     Returns:
         BarRaceData with processed animation data
     """
+    logger.info(f"[BAR_RACE] parse_csv_data started | csv_path={csv_path} | value_col={value_col} | time_col={time_col} | category_col={category_col} | top_k={top_k}")
+
     if not os.path.exists(csv_path):
+        logger.error(f"[BAR_RACE] Dataset not found: {csv_path}")
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
     # Default vibrant color palette
@@ -205,42 +212,50 @@ def parse_csv_data(
     colors = colors or default_colors
 
     # Parse CSV
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
+    logger.info(f"[BAR_RACE] CSV headers detected: {headers}")
 
-        # Resolve column names
-        time_col = _resolve_column(headers, time_col, ["time", "year", "date", "period", "t"])
-        value_col = _resolve_column(headers, value_col, ["value", "count", "score", "gdp", "population", "amount"])
-        category_col = _resolve_column(headers, category_col, ["name", "entity", "country", "category", "label", "item"])
+    # Resolve column names
+    resolved_time_col = _resolve_column(headers, time_col, ["time", "year", "date", "period", "t"])
+    resolved_value_col = _resolve_column(headers, value_col, ["value", "count", "score", "gdp", "population", "amount"])
+    resolved_category_col = _resolve_column(headers, category_col, ["name", "entity", "country", "category", "label", "item"])
 
-        # Collect data
-        data_by_time: Dict[str, Dict[str, float]] = {}
-        all_categories = set()
+    logger.info(f"[BAR_RACE] Column resolution | time: {time_col} -> {resolved_time_col} | value: {value_col} -> {resolved_value_col} | category: {category_col} -> {resolved_category_col}")
 
-        for row in reader:
-            t = (row.get(time_col) or "").strip()
-            c = (row.get(category_col) or "").strip()
-            v_str = (row.get(value_col) or "0").strip()
+    time_col = resolved_time_col
+    value_col = resolved_value_col
+    category_col = resolved_category_col
 
-            if not t or not c:
-                continue
+    # Collect data
+    data_by_time: Dict[str, Dict[str, float]] = {}
+    all_categories = set()
 
-            try:
-                v = float(v_str.replace(",", ""))
-            except ValueError:
-                continue
+    for row in rows:
+        t = (row.get(time_col) or "").strip()
+        c = (row.get(category_col) or "").strip()
+        v_str = (row.get(value_col) or "0").strip()
 
-            if t not in data_by_time:
-                data_by_time[t] = {}
-            data_by_time[t][c] = v
-            all_categories.add(c)
+        if not t or not c:
+            continue
+
+        try:
+            v = float(v_str.replace(",", ""))
+        except ValueError:
+            continue
+
+        if t not in data_by_time:
+            data_by_time[t] = {}
+        data_by_time[t][c] = v
+        all_categories.add(c)
+
+    logger.info(f"[BAR_RACE] Data collection complete | time_periods={len(data_by_time)} | unique_categories={len(all_categories)}")
 
     # Sort times
     times = sorted(data_by_time.keys(), key=_parse_time_key)
 
     if not times:
-        raise ValueError("No valid data found in CSV")
+        logger.error(f"[BAR_RACE] No valid data found | time_col={time_col} | value_col={value_col} | category_col={category_col} | headers={headers}")
+        raise ValueError(f"No valid data found in CSV. Check that columns '{time_col}', '{value_col}', and '{category_col}' exist and contain valid data. Available columns: {headers}")
 
     # Select top K categories
     first_t, last_t = times[0], times[-1]
@@ -266,6 +281,9 @@ def parse_csv_data(
 
     # Assign colors
     category_colors = {cat: colors[i % len(colors)] for i, cat in enumerate(final_categories)}
+
+    logger.info(f"[BAR_RACE] Data processing complete | time_points={len(times)} | categories={len(final_categories)} | max_value={global_max:.2f}")
+    logger.debug(f"[BAR_RACE] Final categories: {final_categories}")
 
     return BarRaceData(
         times=times,
@@ -440,6 +458,9 @@ def generate_bar_race(
     include_intro: bool = True,
     include_conclusion: bool = True,
     auto_highlights: bool = True,
+    time_col: Optional[str] = None,
+    value_col: Optional[str] = None,
+    category_col: Optional[str] = None,
 ) -> str:
     """
     Generate modern, story-driven bar race animation code.
@@ -465,9 +486,10 @@ def generate_bar_race(
     timing = getattr(spec, "timing", None)
     style = getattr(spec, "style", None)
 
-    value_col = getattr(data_binding, "value_col", None) if data_binding else None
-    time_col = getattr(data_binding, "time_col", None) if data_binding else None
-    category_col = getattr(data_binding, "entity_col", None) if data_binding else None
+    # Use provided columns or fall back to spec data_binding
+    _value_col = value_col or (getattr(data_binding, "value_col", None) if data_binding else None)
+    _time_col = time_col or (getattr(data_binding, "time_col", None) if data_binding else None)
+    _category_col = category_col or (getattr(data_binding, "entity_col", None) if data_binding else None)
 
     total_time = getattr(timing, "total_time", 20.0) if timing else 20.0
 
@@ -477,9 +499,9 @@ def generate_bar_race(
     # Parse data
     data = parse_csv_data(
         csv_path=csv_path,
-        value_col=value_col or "value",
-        time_col=time_col or "time",
-        category_col=category_col or "category",
+        value_col=_value_col or "value",
+        time_col=_time_col or "time",
+        category_col=_category_col or "category",
         top_k=12,
         colors=custom_colors,
     )

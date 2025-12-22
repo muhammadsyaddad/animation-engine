@@ -26,8 +26,12 @@ import uuid
 import shutil
 import subprocess
 import time
+import logging
 from typing import List, Tuple, Optional, Generator
 from shutil import which
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.preview_manim")
 try:
     from api.run_registry import register_temp_path, start_tracked_process, get_run, RunState
 except Exception:
@@ -199,7 +203,13 @@ def generate_manim_preview(
             "count": <int>
         }
     """
+    logger.info(f"[PREVIEW] ========== PREVIEW GENERATION STARTED ==========")
+    logger.info(f"[PREVIEW] Parameters | run_id={run_id} | aspect_ratio={aspect_ratio} | quality={quality} | preset={preset}")
+    logger.info(f"[PREVIEW] Sampling config | sample_every={sample_every} | max_frames={max_frames}")
+    logger.debug(f"[PREVIEW] Code length: {len(code)} characters")
+
     if which("manim") is None:
+        logger.error("[PREVIEW] Manim CLI not found in PATH")
         raise PreviewError("Manim CLI not found in PATH. Ensure manim is installed and available.")
 
     artifacts_dir = os.path.join(os.getcwd(), "artifacts")
@@ -212,6 +222,7 @@ def generate_manim_preview(
     frame_size, frame_width, preset_frame_rate, preset_sample_every, preset_max_frames = _get_preview_preset(
         aspect_ratio, preset
     )
+    logger.debug(f"[PREVIEW] Preset config | frame_size={frame_size} | frame_width={frame_width} | preset_frame_rate={preset_frame_rate}")
 
     # If caller used default function values AND preset is final, apply final defaults.
     if preset.lower() == "final":
@@ -221,6 +232,7 @@ def generate_manim_preview(
             max_frames = preset_max_frames
 
     effective_frame_rate = preview_frame_rate if preview_frame_rate is not None else preset_frame_rate
+    logger.info(f"[PREVIEW] Effective settings | frame_rate={effective_frame_rate} | sample_every={sample_every} | max_frames={max_frames}")
 
     early_exit_block = ""
     if enable_early_exit and preset.lower() == "preview":
@@ -289,12 +301,14 @@ config.frame_rate = {effective_frame_rate}
     # Write temporary scene file
     scene_file_name = f"scene_{uuid.uuid4().hex[:6]}.py"
     scene_file_path = os.path.join(work_dir, scene_file_name)
+    logger.debug(f"[PREVIEW] Writing scene file: {scene_file_path}")
     with open(scene_file_path, "w", encoding="utf-8") as f:
         f.write(mod_code)
 
     token = f"preview-{user_id}-{project_name}-{iteration}-{uuid.uuid4().hex[:6]}"
     out_dir = os.path.join(previews_dir, token)
     _ensure_dirs(out_dir)
+    logger.info(f"[PREVIEW] Output token: {token} | output_dir: {out_dir}")
 
     quality_flag = {"low": "-ql", "medium": "-qm", "high": "-qh"}.get(quality.lower(), "-ql")
     cmd = [
@@ -308,6 +322,7 @@ config.frame_rate = {effective_frame_rate}
         "--custom_folders",
         "--disable_caching",
     ]
+    logger.info(f"[PREVIEW] Executing Manim command: {' '.join(cmd)}")
 
     stdout_data = ""
     stderr_data = ""

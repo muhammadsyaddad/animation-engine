@@ -6,9 +6,13 @@ import shutil
 import subprocess
 import time
 import select
+import logging
 from typing import Generator, Tuple, Optional
 from shutil import which
 from api.settings import api_settings
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.video_manim")
 try:
     from api.run_registry import register_temp_path, register_artifact, start_tracked_process
 except Exception:
@@ -130,8 +134,14 @@ def render_manim_stream(
         - Uses `artifacts/` as base for outputs and temporary work.
         - Designed for low-latency feedback: parses stderr for progress like "Animation N: X%".
     """
+    logger.info(f"[RENDER] ========== VIDEO RENDER STARTED ==========")
+    logger.info(f"[RENDER] Parameters | run_id={run_id} | aspect_ratio={aspect_ratio} | quality={quality}")
+    logger.info(f"[RENDER] User context | user_id={user_id} | project_name={project_name} | iteration={iteration}")
+    logger.debug(f"[RENDER] Code length: {len(code)} characters")
+
     # Quick check for manim CLI
     if which("manim") is None:
+        logger.error("[RENDER] Manim CLI not found in PATH")
         yield {
             "event": "RunError",
             "content": "Manim CLI not found in PATH. Ensure manim is installed and available."
@@ -142,12 +152,16 @@ def render_manim_stream(
     videos_dir = os.path.join(artifacts_dir, "videos")
     work_dir = os.path.join(artifacts_dir, "work", str(uuid.uuid4()))
 
+    logger.debug(f"[RENDER] Directories | artifacts={artifacts_dir} | videos={videos_dir} | work={work_dir}")
+
     _ensure_dirs(artifacts_dir, videos_dir, work_dir)
     if run_id and register_temp_path:
         register_temp_path(run_id, work_dir)
+        logger.debug(f"[RENDER] Registered temp path for run_id={run_id}")
 
     # Prepend config for frame settings to the provided code
     frame_size, frame_width = _get_frame_config(aspect_ratio)
+    logger.info(f"[RENDER] Frame config | frame_size={frame_size} | frame_width={frame_width}")
     mod_code = f"""
 from manim import *
 from math import *

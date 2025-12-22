@@ -1,0 +1,496 @@
+name,time,value
+Strafford,code,33017
+Carroll,code,33003
+Belknap,code,33001
+Windsor,code,50027
+Rockingham,code,33015
+Grafton,code,33009
+Merrimack,code,33013
+Sullivan,code,33019
+Coos,code,33007
+Hillsborough,code,33011
+Cheshire,code,33005
+Strafford,Jeb Bush,46
+Carroll,Jeb Bush,37
+Belknap,Jeb Bush,65
+Windsor,Jeb Bush,0
+Rockingham,Jeb Bush,66
+Grafton,Jeb Bush,53
+Merrimack,Jeb Bush,74
+Sullivan,Jeb Bush,46
+Coos,Jeb Bush,37
+Hillsborough,Jeb Bush,72
+Cheshire,Jeb Bush,100
+Strafford,Ben Carson,74
+Carroll,Ben Carson,69
+Belknap,Ben Carson,76
+Windsor,Ben Carson,0
+Rockingham,Ben Carson,100
+Grafton,Ben Carson,62
+Merrimack,Ben Carson,71
+Sullivan,Ben Carson,81
+Coos,Ben Carson,40
+Hillsborough,Ben Carson,81
+Cheshire,Ben Carson,94
+Strafford,Ted Cruz,82
+Carroll,Ted Cruz,63
+Belknap,Ted Cruz,84
+Windsor,Ted Cruz,0
+Rockingham,Ted Cruz,99
+Grafton,Ted Cruz,81
+Merrimack,Ted Cruz,100
+Sullivan,Ted Cruz,72
+Coos,Ted Cruz,37
+Hillsborough,Ted Cruz,98
+Cheshire,Ted Cruz,82
+Strafford,John Kasich,61
+Carroll,John Kasich,59
+Belknap,John Kasich,61
+Windsor,John Kasich,0
+Rockingham,John Kasich,91
+Grafton,John Kasich,75
+Merrimack,John Kasich,100
+Sullivan,John Kasich,81
+Coos,John Kasich,17
+Hillsborough,John Kasich,95
+Cheshire,John Kasich,71
+Strafford,Rand Paul,56
+Carroll,Rand Paul,76
+Belknap,Rand Paul,42
+Windsor,Rand Paul,0
+Rockingham,Rand Paul,72
+Grafton,Rand Paul,58
+Merrimack,Rand Paul,73
+Sullivan,Rand Paul,100
+Coos,Rand Paul,81
+Hillsborough,Rand Paul,99
+Cheshire,Rand Paul,96
+Strafford,Marco Rubio,83
+Carroll,Marco Rubio,64
+Belknap,Marco Rubio,73
+Windsor,Marco Rubio,0
+Rockingham,Marco Rubio,91
+Grafton,Marco Rubio,79
+Merrimack,Marco Rubio,100
+Sullivan,Marco Rubio,76
+Coos,Marco Rubio,72
+Hillsborough,Marco Rubio,82
+Cheshire,Marco Rubio,72
+Strafford,Donald Trump,53
+Carroll,Donald Trump,49
+Belknap,Donald Trump,48
+Windsor,Donald Trump,100
+Rockingham,Donald Trump,63
+Grafton,Donald Trump,49
+Merrimack,Donald Trump,55
+Sullivan,Donald Trump,45
+Coos,Donald Trump,48
+Hillsborough,Donald Trump,60
+Cheshire,Donald Trump,60
+Strafford,Carly Fiorina,72
+Carroll,Carly Fiorina,57
+Belknap,Carly Fiorina,66
+Windsor,Carly Fiorina,0
+Rockingham,Carly Fiorina,78
+Grafton,Carly Fiorina,52
+Merrimack,Carly Fiorina,79
+Sullivan,Carly Fiorina,100
+Coos,Carly Fiorina,54
+Hillsborough,Carly Fiorina,69
+Cheshire,Carly Fiorina,46
+Strafford,Chris Christie,51
+Carroll,Chris Christie,31
+Belknap,Chris Christie,37
+Windsor,Chris Christie,0
+Rockingham,Chris Christie,89
+Grafton,Chris Christie,45
+Merrimack,Chris Christie,100
+Sullivan,Chris Christie,38
+Coos,Chris Christie,27
+Hillsborough,Chris Christie,90
+Cheshire,Chris Christie,60
+Strafford,Rick Santorum,49
+Carroll,Rick Santorum,78
+Belknap,Rick Santorum,38
+Windsor,Rick Santorum,0
+Rockingham,Rick Santorum,75
+Grafton,Rick Santorum,49
+Merrimack,Rick Santorum,43
+Sullivan,Rick Santorum,56
+Coos,Rick Santorum,100
+Hillsborough,Rick Santorum,66
+Cheshire,Rick Santorum,45
+Strafford,Hillary Clinton,77
+Carroll,Hillary Clinton,69
+Belknap,Hillary Clinton,62
+Windsor,Hillary Clinton,0
+Rockingham,Hillary Clinton,82
+Grafton,Hillary Clinton,100
+Merrimack,Hillary Clinton,87
+Sullivan,Hillary Clinton,76
+Coos,Hillary Clinton,60
+Hillsborough,Hillary Clinton,81
+Cheshire,Hillary Clinton,69
+Strafford,Bernie Sanders,73
+Carroll,Bernie Sanders,64
+Belknap,Bernie Sanders,59
+Windsor,Bernie Sanders,45
+Rockingham,Bernie Sanders,70
+Grafton,Bernie Sanders,100
+Merrimack,Bernie Sanders,74
+Sullivan,Bernie Sanders,99
+Coos,Bernie Sanders,51
+Hillsborough,Bernie Sanders,62
+Cheshire,Bernie Sanders,97
+Strafford,Taxes,48
+Carroll,Taxes,53
+Belknap,Taxes,54
+Windsor,Taxes,100
+Rockingham,Taxes,51
+Grafton,Taxes,48
+Merrimack,Taxes,47
+Sullivan,Taxes,49
+Coos,Taxes,49
+Hillsborough,Taxes,50
+Cheshire,Taxes,47
+Strafford,Immigration,32
+Carroll,Immigration,23
+Belknap,Immigration,39
+Windsor,Immigration,0
+Rockingham,Immigration,45
+Grafton,Immigration,40
+Merrimack,Immigration,44
+Sullivan,Immigration,40
+Coos,Immigration,100
+Hillsborough,Immigration,35
+Cheshire,Immigration,43
+Strafford,Economy,73
+Carroll,Economy,68
+Belknap,Economy,54
+Windsor,Economy,0
+Rockingham,Economy,66
+Grafton,Economy,100
+Merrimack,Economy,81
+Sullivan,Economy,55
+Coos,Economy,77
+Hillsborough,Economy,62
+Cheshire,Economy,63
+Strafford,ObamaCare,71
+Carroll,ObamaCare,100
+Belknap,ObamaCare,83
+Windsor,ObamaCare,0
+Rockingham,ObamaCare,85
+Grafton,ObamaCare,66
+Merrimack,ObamaCare,77
+Sullivan,ObamaCare,68
+Coos,ObamaCare,89
+Hillsborough,ObamaCare,79
+Cheshire,ObamaCare,82
+Strafford,Foreign Policy,61
+Carroll,Foreign Policy,0
+Belknap,Foreign Policy,33
+Windsor,Foreign Policy,0
+Rockingham,Foreign Policy,68
+Grafton,Foreign Policy,80
+Merrimack,Foreign Policy,50
+Sullivan,Foreign Policy,100
+Coos,Foreign Policy,0
+Hillsborough,Foreign Policy,53
+Cheshire,Foreign Policy,69
+Strafford,Minimum Wage,21
+Carroll,Minimum Wage,22
+Belknap,Minimum Wage,22
+Windsor,Minimum Wage,100
+Rockingham,Minimum Wage,25
+Grafton,Minimum Wage,25
+Merrimack,Minimum Wage,19
+Sullivan,Minimum Wage,22
+Coos,Minimum Wage,42
+Hillsborough,Minimum Wage,20
+Cheshire,Minimum Wage,31
+Strafford,Trans-Pacific Partnership (TPP),93
+Carroll,Trans-Pacific Partnership (TPP),15
+Belknap,Trans-Pacific Partnership (TPP),13
+Windsor,Trans-Pacific Partnership (TPP),0
+Rockingham,Trans-Pacific Partnership (TPP),54
+Grafton,Trans-Pacific Partnership (TPP),100
+Merrimack,Trans-Pacific Partnership (TPP),43
+Sullivan,Trans-Pacific Partnership (TPP),87
+Coos,Trans-Pacific Partnership (TPP),39
+Hillsborough,Trans-Pacific Partnership (TPP),24
+Cheshire,Trans-Pacific Partnership (TPP),53
+Strafford,Income Inequality,44
+Carroll,Income Inequality,40
+Belknap,Income Inequality,34
+Windsor,Income Inequality,0
+Rockingham,Income Inequality,18
+Grafton,Income Inequality,100
+Merrimack,Income Inequality,22
+Sullivan,Income Inequality,14
+Coos,Income Inequality,0
+Hillsborough,Income Inequality,21
+Cheshire,Income Inequality,70
+Strafford,ISIS,68
+Carroll,ISIS,76
+Belknap,ISIS,88
+Windsor,ISIS,0
+Rockingham,ISIS,90
+Grafton,ISIS,68
+Merrimack,ISIS,100
+Sullivan,ISIS,86
+Coos,ISIS,61
+Hillsborough,ISIS,72
+Cheshire,ISIS,82
+Strafford,Guns,75
+Carroll,Guns,86
+Belknap,Guns,96
+Windsor,Guns,42
+Rockingham,Guns,88
+Grafton,Guns,75
+Merrimack,Guns,81
+Sullivan,Guns,100
+Coos,Guns,85
+Hillsborough,Guns,82
+Cheshire,Guns,96
+Strafford,Unnamed: 28,46
+Carroll,Unnamed: 28,37
+Belknap,Unnamed: 28,65
+Windsor,Unnamed: 28,0
+Rockingham,Unnamed: 28,66
+Grafton,Unnamed: 28,53
+Merrimack,Unnamed: 28,74
+Sullivan,Unnamed: 28,46
+Coos,Unnamed: 28,37
+Hillsborough,Unnamed: 28,72
+Cheshire,Unnamed: 28,100
+Strafford,Unnamed: 29,74
+Carroll,Unnamed: 29,69
+Belknap,Unnamed: 29,76
+Windsor,Unnamed: 29,0
+Rockingham,Unnamed: 29,100
+Grafton,Unnamed: 29,62
+Merrimack,Unnamed: 29,71
+Sullivan,Unnamed: 29,81
+Coos,Unnamed: 29,40
+Hillsborough,Unnamed: 29,81
+Cheshire,Unnamed: 29,94
+Strafford,Unnamed: 30,82
+Carroll,Unnamed: 30,63
+Belknap,Unnamed: 30,84
+Windsor,Unnamed: 30,0
+Rockingham,Unnamed: 30,99
+Grafton,Unnamed: 30,81
+Merrimack,Unnamed: 30,100
+Sullivan,Unnamed: 30,72
+Coos,Unnamed: 30,37
+Hillsborough,Unnamed: 30,98
+Cheshire,Unnamed: 30,82
+Strafford,Unnamed: 31,61
+Carroll,Unnamed: 31,59
+Belknap,Unnamed: 31,61
+Windsor,Unnamed: 31,0
+Rockingham,Unnamed: 31,91
+Grafton,Unnamed: 31,75
+Merrimack,Unnamed: 31,100
+Sullivan,Unnamed: 31,81
+Coos,Unnamed: 31,17
+Hillsborough,Unnamed: 31,95
+Cheshire,Unnamed: 31,71
+Strafford,Unnamed: 32,56
+Carroll,Unnamed: 32,76
+Belknap,Unnamed: 32,42
+Windsor,Unnamed: 32,0
+Rockingham,Unnamed: 32,72
+Grafton,Unnamed: 32,58
+Merrimack,Unnamed: 32,73
+Sullivan,Unnamed: 32,100
+Coos,Unnamed: 32,81
+Hillsborough,Unnamed: 32,99
+Cheshire,Unnamed: 32,96
+Strafford,Unnamed: 33,83
+Carroll,Unnamed: 33,64
+Belknap,Unnamed: 33,73
+Windsor,Unnamed: 33,0
+Rockingham,Unnamed: 33,91
+Grafton,Unnamed: 33,79
+Merrimack,Unnamed: 33,100
+Sullivan,Unnamed: 33,76
+Coos,Unnamed: 33,72
+Hillsborough,Unnamed: 33,82
+Cheshire,Unnamed: 33,72
+Strafford,Unnamed: 34,53
+Carroll,Unnamed: 34,49
+Belknap,Unnamed: 34,48
+Windsor,Unnamed: 34,100
+Rockingham,Unnamed: 34,63
+Grafton,Unnamed: 34,49
+Merrimack,Unnamed: 34,55
+Sullivan,Unnamed: 34,45
+Coos,Unnamed: 34,48
+Hillsborough,Unnamed: 34,60
+Cheshire,Unnamed: 34,60
+Strafford,Unnamed: 35,72
+Carroll,Unnamed: 35,57
+Belknap,Unnamed: 35,66
+Windsor,Unnamed: 35,0
+Rockingham,Unnamed: 35,78
+Grafton,Unnamed: 35,52
+Merrimack,Unnamed: 35,79
+Sullivan,Unnamed: 35,100
+Coos,Unnamed: 35,54
+Hillsborough,Unnamed: 35,69
+Cheshire,Unnamed: 35,46
+Strafford,Unnamed: 36,51
+Carroll,Unnamed: 36,31
+Belknap,Unnamed: 36,37
+Windsor,Unnamed: 36,0
+Rockingham,Unnamed: 36,89
+Grafton,Unnamed: 36,45
+Merrimack,Unnamed: 36,100
+Sullivan,Unnamed: 36,38
+Coos,Unnamed: 36,27
+Hillsborough,Unnamed: 36,90
+Cheshire,Unnamed: 36,60
+Strafford,Unnamed: 37,49
+Carroll,Unnamed: 37,78
+Belknap,Unnamed: 37,38
+Windsor,Unnamed: 37,0
+Rockingham,Unnamed: 37,75
+Grafton,Unnamed: 37,49
+Merrimack,Unnamed: 37,43
+Sullivan,Unnamed: 37,56
+Coos,Unnamed: 37,100
+Hillsborough,Unnamed: 37,66
+Cheshire,Unnamed: 37,45
+Strafford,Unnamed: 38,77
+Carroll,Unnamed: 38,69
+Belknap,Unnamed: 38,62
+Windsor,Unnamed: 38,0
+Rockingham,Unnamed: 38,82
+Grafton,Unnamed: 38,100
+Merrimack,Unnamed: 38,87
+Sullivan,Unnamed: 38,76
+Coos,Unnamed: 38,60
+Hillsborough,Unnamed: 38,81
+Cheshire,Unnamed: 38,69
+Strafford,Unnamed: 39,73
+Carroll,Unnamed: 39,64
+Belknap,Unnamed: 39,59
+Windsor,Unnamed: 39,45
+Rockingham,Unnamed: 39,70
+Grafton,Unnamed: 39,100
+Merrimack,Unnamed: 39,74
+Sullivan,Unnamed: 39,99
+Coos,Unnamed: 39,51
+Hillsborough,Unnamed: 39,62
+Cheshire,Unnamed: 39,97
+Strafford,Unnamed: 40,48
+Carroll,Unnamed: 40,53
+Belknap,Unnamed: 40,54
+Windsor,Unnamed: 40,100
+Rockingham,Unnamed: 40,51
+Grafton,Unnamed: 40,48
+Merrimack,Unnamed: 40,47
+Sullivan,Unnamed: 40,49
+Coos,Unnamed: 40,49
+Hillsborough,Unnamed: 40,50
+Cheshire,Unnamed: 40,47
+Strafford,Unnamed: 41,32
+Carroll,Unnamed: 41,23
+Belknap,Unnamed: 41,39
+Windsor,Unnamed: 41,0
+Rockingham,Unnamed: 41,45
+Grafton,Unnamed: 41,40
+Merrimack,Unnamed: 41,44
+Sullivan,Unnamed: 41,40
+Coos,Unnamed: 41,100
+Hillsborough,Unnamed: 41,35
+Cheshire,Unnamed: 41,43
+Strafford,Unnamed: 42,73
+Carroll,Unnamed: 42,68
+Belknap,Unnamed: 42,54
+Windsor,Unnamed: 42,0
+Rockingham,Unnamed: 42,66
+Grafton,Unnamed: 42,100
+Merrimack,Unnamed: 42,81
+Sullivan,Unnamed: 42,55
+Coos,Unnamed: 42,77
+Hillsborough,Unnamed: 42,62
+Cheshire,Unnamed: 42,63
+Strafford,Unnamed: 43,71
+Carroll,Unnamed: 43,100
+Belknap,Unnamed: 43,83
+Windsor,Unnamed: 43,0
+Rockingham,Unnamed: 43,85
+Grafton,Unnamed: 43,66
+Merrimack,Unnamed: 43,77
+Sullivan,Unnamed: 43,68
+Coos,Unnamed: 43,89
+Hillsborough,Unnamed: 43,79
+Cheshire,Unnamed: 43,82
+Strafford,Unnamed: 44,61
+Carroll,Unnamed: 44,0
+Belknap,Unnamed: 44,33
+Windsor,Unnamed: 44,0
+Rockingham,Unnamed: 44,68
+Grafton,Unnamed: 44,80
+Merrimack,Unnamed: 44,50
+Sullivan,Unnamed: 44,100
+Coos,Unnamed: 44,0
+Hillsborough,Unnamed: 44,53
+Cheshire,Unnamed: 44,69
+Strafford,Unnamed: 45,21
+Carroll,Unnamed: 45,22
+Belknap,Unnamed: 45,22
+Windsor,Unnamed: 45,100
+Rockingham,Unnamed: 45,25
+Grafton,Unnamed: 45,25
+Merrimack,Unnamed: 45,19
+Sullivan,Unnamed: 45,22
+Coos,Unnamed: 45,42
+Hillsborough,Unnamed: 45,20
+Cheshire,Unnamed: 45,31
+Strafford,Unnamed: 46,93
+Carroll,Unnamed: 46,15
+Belknap,Unnamed: 46,13
+Windsor,Unnamed: 46,0
+Rockingham,Unnamed: 46,54
+Grafton,Unnamed: 46,100
+Merrimack,Unnamed: 46,43
+Sullivan,Unnamed: 46,87
+Coos,Unnamed: 46,39
+Hillsborough,Unnamed: 46,24
+Cheshire,Unnamed: 46,53
+Strafford,Unnamed: 47,44
+Carroll,Unnamed: 47,40
+Belknap,Unnamed: 47,34
+Windsor,Unnamed: 47,0
+Rockingham,Unnamed: 47,18
+Grafton,Unnamed: 47,100
+Merrimack,Unnamed: 47,22
+Sullivan,Unnamed: 47,14
+Coos,Unnamed: 47,0
+Hillsborough,Unnamed: 47,21
+Cheshire,Unnamed: 47,70
+Strafford,Unnamed: 48,68
+Carroll,Unnamed: 48,76
+Belknap,Unnamed: 48,88
+Windsor,Unnamed: 48,0
+Rockingham,Unnamed: 48,90
+Grafton,Unnamed: 48,68
+Merrimack,Unnamed: 48,100
+Sullivan,Unnamed: 48,86
+Coos,Unnamed: 48,61
+Hillsborough,Unnamed: 48,72
+Cheshire,Unnamed: 48,82
+Strafford,Unnamed: 49,75
+Carroll,Unnamed: 49,86
+Belknap,Unnamed: 49,96
+Windsor,Unnamed: 49,42
+Rockingham,Unnamed: 49,88
+Grafton,Unnamed: 49,75
+Merrimack,Unnamed: 49,81
+Sullivan,Unnamed: 49,100
+Coos,Unnamed: 49,85
+Hillsborough,Unnamed: 49,82
+Cheshire,Unnamed: 49,96

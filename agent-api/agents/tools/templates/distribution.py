@@ -34,10 +34,14 @@ Usage:
 from __future__ import annotations
 
 import csv
+import logging
 import math
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.templates.distribution")
 
 # Import primitives
 from agents.tools.primitives.elements import (
@@ -194,43 +198,57 @@ def parse_csv_data(
     Returns:
         DistributionData with processed animation data
     """
+    logger.info(f"[DISTRIBUTION] parse_csv_data started | csv_path={csv_path} | value_col={value_col} | time_col={time_col} | num_bins={num_bins}")
+
     if not os.path.exists(csv_path):
+        logger.error(f"[DISTRIBUTION] Dataset not found: {csv_path}")
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
+    logger.info(f"[DISTRIBUTION] CSV headers detected: {headers}")
 
-        # Resolve column names
-        time_col = _resolve_column(
-            headers, time_col,
-            ["time", "year", "date", "period", "t"]
-        )
-        value_col = _resolve_column(
-            headers, value_col,
-            ["value", "population", "count", "amount", "score", "gdp"]
-        )
+    # Resolve column names
+    resolved_time_col = _resolve_column(
+        headers, time_col,
+        ["time", "year", "date", "period", "t"]
+    )
+    resolved_value_col = _resolve_column(
+        headers, value_col,
+        ["value", "population", "count", "amount", "score", "gdp"]
+    )
 
-        # Collect values by time
-        values_by_time: Dict[str, List[float]] = {}
-        all_values: List[float] = []
+    logger.info(f"[DISTRIBUTION] Column resolution | requested_time={time_col} -> resolved_time={resolved_time_col} | requested_value={value_col} -> resolved_value={resolved_value_col}")
 
-        for row in reader:
-            t = (row.get(time_col) or "").strip()
-            v_str = (row.get(value_col) or "").strip()
+    time_col = resolved_time_col
+    value_col = resolved_value_col
 
-            if not t or not v_str:
-                continue
+    # Collect values by time
+    values_by_time: Dict[str, List[float]] = {}
+    all_values: List[float] = []
+    skipped_rows = 0
 
-            try:
-                v = float(v_str.replace(",", ""))
-                values_by_time.setdefault(t, []).append(v)
-                all_values.append(v)
-            except ValueError:
-                continue
+    for row in rows:
+        t = (row.get(time_col) or "").strip()
+        v_str = (row.get(value_col) or "").strip()
+
+        if not t or not v_str:
+            skipped_rows += 1
+            continue
+
+        try:
+            v = float(v_str.replace(",", ""))
+            values_by_time.setdefault(t, []).append(v)
+            all_values.append(v)
+        except ValueError:
+            skipped_rows += 1
+            logger.debug(f"[DISTRIBUTION] Skipped row - could not parse value: time={t}, value_str={v_str}")
+            continue
+
+    logger.info(f"[DISTRIBUTION] Data collection complete | valid_values={len(all_values)} | time_periods={len(values_by_time)} | skipped_rows={skipped_rows}")
 
     if not values_by_time or not all_values:
-        raise ValueError("No valid data found for distribution")
+        logger.error(f"[DISTRIBUTION] No valid data found | time_col={time_col} | value_col={value_col} | headers={headers}")
+        raise ValueError(f"No valid data found for distribution. Check that columns '{time_col}' and '{value_col}' exist and contain valid data. Available columns: {headers}")
 
     # Sort times
     times = sorted(values_by_time.keys(), key=_parse_time_key)
@@ -370,6 +388,8 @@ def generate_distribution(
     include_intro: bool = True,
     include_conclusion: bool = True,
     auto_highlights: bool = True,
+    value_col: Optional[str] = None,
+    group_col: Optional[str] = None,
 ) -> str:
     """
     Generate modern, story-driven distribution animation code.
@@ -395,7 +415,9 @@ def generate_distribution(
     timing = getattr(spec, "timing", None)
     axes_config = getattr(spec, "axes", None)
 
-    value_col = getattr(data_binding, "value_col", None) if data_binding else None
+    # Use provided columns or fall back to spec data_binding
+    _value_col = value_col or (getattr(data_binding, "value_col", None) if data_binding else None)
+    _group_col = group_col or (getattr(data_binding, "group_col", None) if data_binding else None)
     time_col = getattr(data_binding, "time_col", None) if data_binding else None
 
     total_time = getattr(timing, "total_time", 20.0) if timing else 20.0
@@ -408,7 +430,7 @@ def generate_distribution(
     # Parse data
     data = parse_csv_data(
         csv_path=csv_path,
-        value_col=value_col or "value",
+        value_col=_value_col or "value",
         time_col=time_col or "time",
         num_bins=num_bins,
     )

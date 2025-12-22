@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 class RunState(Enum):
     CREATED = auto()
     STARTING = auto()
+    AWAITING_TEMPLATE_SELECTION = auto()  # Waiting for user to select a template
     PREVIEWING = auto()
     RENDERING = auto()
     EXPORTING = auto()
@@ -92,6 +93,12 @@ class RunInfo:
     temp_paths: List[str] = field(default_factory=list)              # work dirs to clean on cancel
     artifacts: List[str] = field(default_factory=list)               # produced outputs (retain)
 
+    # Pending template selection state (stored in run for reliable lookup by run_id)
+    pending_template_suggestions: List[Dict] = field(default_factory=list)
+    pending_original_message: Optional[str] = None
+    pending_csv_path: Optional[str] = None
+    pending_data_binding: Dict[str, Optional[str]] = field(default_factory=dict)
+
     def to_dict(self) -> dict:
         d = asdict(self)
         # Serialize Enums
@@ -106,6 +113,32 @@ class RunInfo:
                 "running": v.is_running(),
             }
         return d
+
+    def has_pending_template_selection(self) -> bool:
+        """Check if this run has pending template selection data."""
+        return bool(self.pending_template_suggestions)
+
+    def set_pending_template_selection(
+        self,
+        suggestions: List[Dict],
+        original_message: Optional[str] = None,
+        csv_path: Optional[str] = None,
+        data_binding: Optional[Dict[str, Optional[str]]] = None,
+    ) -> None:
+        """Store pending template selection state in the run."""
+        self.pending_template_suggestions = suggestions
+        self.pending_original_message = original_message
+        self.pending_csv_path = csv_path
+        self.pending_data_binding = data_binding or {}
+        self.updated_at = time.time()
+
+    def clear_pending_template_selection(self) -> None:
+        """Clear pending template selection state."""
+        self.pending_template_suggestions = []
+        self.pending_original_message = None
+        self.pending_csv_path = None
+        self.pending_data_binding = {}
+        self.updated_at = time.time()
 
 
 # Global registry and lock
@@ -173,6 +206,49 @@ def update_message(run_id: str, message: str) -> None:
             return
         info.message = message
         info.updated_at = _now()
+
+
+def set_pending_template_selection(
+    run_id: str,
+    suggestions: List[Dict],
+    original_message: Optional[str] = None,
+    csv_path: Optional[str] = None,
+    data_binding: Optional[Dict[str, Optional[str]]] = None,
+) -> None:
+    """Store pending template selection state in a run."""
+    with _registry_lock:
+        info = _registry.get(run_id)
+        if not info:
+            return
+        info.set_pending_template_selection(
+            suggestions=suggestions,
+            original_message=original_message,
+            csv_path=csv_path,
+            data_binding=data_binding,
+        )
+
+
+def get_pending_template_selection(run_id: str) -> Optional[Dict]:
+    """Get pending template selection state from a run."""
+    with _registry_lock:
+        info = _registry.get(run_id)
+        if not info or not info.has_pending_template_selection():
+            return None
+        return {
+            "suggestions": info.pending_template_suggestions,
+            "original_message": info.pending_original_message,
+            "csv_path": info.pending_csv_path,
+            "data_binding": info.pending_data_binding,
+        }
+
+
+def clear_pending_template_selection(run_id: str) -> None:
+    """Clear pending template selection state from a run."""
+    with _registry_lock:
+        info = _registry.get(run_id)
+        if not info:
+            return
+        info.clear_pending_template_selection()
 
 
 def register_temp_path(run_id: str, path: str) -> None:

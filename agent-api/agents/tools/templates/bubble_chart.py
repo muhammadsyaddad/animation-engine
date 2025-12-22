@@ -35,10 +35,14 @@ Usage:
 from __future__ import annotations
 
 import csv
+import logging
 import math
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.templates.bubble_chart")
 
 # Import primitives
 from agents.tools.primitives.elements import (
@@ -198,7 +202,11 @@ def parse_csv_data(
     """
     Parse CSV and prepare data for bubble chart animation.
     """
+    logger.info(f"[BUBBLE_CHART] parse_csv_data started | csv_path={csv_path}")
+    logger.info(f"[BUBBLE_CHART] Column params | x={x_col} | y={y_col} | r={r_col} | time={time_col} | entity={entity_col} | group={group_col}")
+
     if not os.path.exists(csv_path):
+        logger.error(f"[BUBBLE_CHART] Dataset not found: {csv_path}")
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
     # Default vibrant color palette
@@ -218,66 +226,78 @@ def parse_csv_data(
     ]
     colors = colors or default_colors
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
+    logger.info(f"[BUBBLE_CHART] CSV headers detected: {headers}")
 
-        # Resolve column names with smart matching
-        x_col = _resolve_column(headers, x_col, ["x", "gdp", "income", "gdp_per_capita", "wealth"])
-        y_col = _resolve_column(headers, y_col, ["y", "life_expectancy", "lifeexp", "health", "score"])
-        r_col = _resolve_column(headers, r_col, ["r", "size", "population", "pop", "radius", "count"])
-        time_col = _resolve_column(headers, time_col, ["time", "year", "date", "period", "t"])
-        entity_col = _resolve_column(headers, entity_col, ["entity", "name", "country", "region", "item", "label"])
-        group_col = _resolve_column(headers, group_col, ["group", "category", "continent", "region", "type", "class"])
+    # Resolve column names with smart matching
+    resolved_x = _resolve_column(headers, x_col, ["x", "gdp", "income", "gdp_per_capita", "wealth"])
+    resolved_y = _resolve_column(headers, y_col, ["y", "life_expectancy", "lifeexp", "health", "score"])
+    resolved_r = _resolve_column(headers, r_col, ["r", "size", "population", "pop", "radius", "count"])
+    resolved_time = _resolve_column(headers, time_col, ["time", "year", "date", "period", "t"])
+    resolved_entity = _resolve_column(headers, entity_col, ["entity", "name", "country", "region", "item", "label"])
+    resolved_group = _resolve_column(headers, group_col, ["group", "category", "continent", "region", "type", "class"])
 
-        # Collect data
-        data_by_time: Dict[str, Dict[str, Dict[str, float]]] = {}
-        entity_group_map: Dict[str, str] = {}
-        all_entities: set = set()
-        all_groups: set = set()
+    logger.info(f"[BUBBLE_CHART] Column resolution | x: {x_col} -> {resolved_x} | y: {y_col} -> {resolved_y} | r: {r_col} -> {resolved_r}")
+    logger.info(f"[BUBBLE_CHART] Column resolution | time: {time_col} -> {resolved_time} | entity: {entity_col} -> {resolved_entity} | group: {group_col} -> {resolved_group}")
 
-        # Track value ranges
-        x_vals, y_vals, r_vals = [], [], []
+    x_col = resolved_x
+    y_col = resolved_y
+    r_col = resolved_r
+    time_col = resolved_time
+    entity_col = resolved_entity
+    group_col = resolved_group
 
-        for row in reader:
-            t = (row.get(time_col) or "").strip()
-            entity = (row.get(entity_col) or "").strip()
+    # Collect data
+    data_by_time: Dict[str, Dict[str, Dict[str, float]]] = {}
+    entity_group_map: Dict[str, str] = {}
+    all_entities: set = set()
+    all_groups: set = set()
 
-            if not entity:
-                continue
+    # Track value ranges
+    x_vals, y_vals, r_vals = [], [], []
 
-            # If no time column, use "1" as default (single snapshot)
-            if not t:
-                t = "1"
+    for row in rows:
+        t = (row.get(time_col) or "").strip()
+        entity = (row.get(entity_col) or "").strip()
 
-            # Parse numeric values
-            try:
-                x_val = float((row.get(x_col) or "0").strip().replace(",", ""))
-                y_val = float((row.get(y_col) or "0").strip().replace(",", ""))
-                r_val = float((row.get(r_col) or "1").strip().replace(",", ""))
-            except ValueError:
-                continue
+        if not entity:
+            continue
 
-            # Get group (use "ALL" if not specified)
-            group = (row.get(group_col) or "ALL").strip()
-            if not group:
-                group = "ALL"
+        # If no time column, use "1" as default (single snapshot)
+        if not t:
+            t = "1"
 
-            # Store data
-            if t not in data_by_time:
-                data_by_time[t] = {}
+        # Parse numeric values
+        try:
+            x_val = float((row.get(x_col) or "0").strip().replace(",", ""))
+            y_val = float((row.get(y_col) or "0").strip().replace(",", ""))
+            r_val = float((row.get(r_col) or "1").strip().replace(",", ""))
+        except ValueError:
+            continue
 
-            data_by_time[t][entity] = {"x": x_val, "y": y_val, "r": r_val}
-            entity_group_map[entity] = group
-            all_entities.add(entity)
-            all_groups.add(group)
+        # Get group (use "ALL" if not specified)
+        group = (row.get(group_col) or "ALL").strip()
+        if not group:
+            group = "ALL"
 
-            x_vals.append(x_val)
-            y_vals.append(y_val)
-            r_vals.append(r_val)
+        # Store data
+        if t not in data_by_time:
+            data_by_time[t] = {}
+
+        data_by_time[t][entity] = {"x": x_val, "y": y_val, "r": r_val}
+        entity_group_map[entity] = group
+        all_entities.add(entity)
+        all_groups.add(group)
+
+        x_vals.append(x_val)
+        y_vals.append(y_val)
+        r_vals.append(r_val)
+
+    logger.info(f"[BUBBLE_CHART] Data collection complete | time_periods={len(data_by_time)} | entities={len(all_entities)} | groups={len(all_groups)}")
 
     if not data_by_time or not x_vals:
-        raise ValueError("No valid data found for bubble chart")
+        logger.error(f"[BUBBLE_CHART] No valid data found | x_col={x_col} | y_col={y_col} | entity_col={entity_col} | headers={headers}")
+        raise ValueError(f"No valid data found for bubble chart. Check that columns '{x_col}', '{y_col}', '{entity_col}' exist and contain valid data. Available columns: {headers}")
 
     # Sort times
     times = sorted(data_by_time.keys(), key=_parse_time_key)
@@ -296,6 +316,9 @@ def parse_csv_data(
     x_range = (x_min - x_pad, x_max + x_pad)
     y_range = (y_min - y_pad, y_max + y_pad)
     r_range = (max(r_min, 0.001), max(r_max, 0.001))
+
+    logger.info(f"[BUBBLE_CHART] Data processing complete | time_points={len(times)} | entities={len(entities)} | groups={len(groups)}")
+    logger.debug(f"[BUBBLE_CHART] Value ranges | x={x_range} | y={y_range} | r={r_range}")
 
     # Assign colors to groups
     group_colors = {g: colors[i % len(colors)] for i, g in enumerate(groups)}
@@ -397,6 +420,12 @@ def generate_bubble_chart(
     include_intro: bool = True,
     include_conclusion: bool = True,
     auto_highlights: bool = True,
+    x_col: Optional[str] = None,
+    y_col: Optional[str] = None,
+    r_col: Optional[str] = None,
+    time_col: Optional[str] = None,
+    entity_col: Optional[str] = None,
+    group_col: Optional[str] = None,
 ) -> str:
     """
     Generate modern, story-driven bubble chart animation code.
@@ -422,13 +451,13 @@ def generate_bubble_chart(
     style = getattr(spec, "style", None)
     axes_config = getattr(spec, "axes", None)
 
-    # Data binding columns
-    x_col = getattr(data_binding, "x", None) or getattr(data_binding, "x_col", None) if data_binding else None
-    y_col = getattr(data_binding, "y", None) or getattr(data_binding, "y_col", None) if data_binding else None
-    r_col = getattr(data_binding, "r", None) or getattr(data_binding, "r_col", None) if data_binding else None
-    time_col = getattr(data_binding, "time", None) or getattr(data_binding, "time_col", None) if data_binding else None
-    entity_col = getattr(data_binding, "entity", None) or getattr(data_binding, "entity_col", None) if data_binding else None
-    group_col = getattr(data_binding, "group", None) or getattr(data_binding, "group_col", None) if data_binding else None
+    # Data binding columns - use provided columns or fall back to spec data_binding
+    _x_col = x_col or (getattr(data_binding, "x", None) or getattr(data_binding, "x_col", None) if data_binding else None)
+    _y_col = y_col or (getattr(data_binding, "y", None) or getattr(data_binding, "y_col", None) if data_binding else None)
+    _r_col = r_col or (getattr(data_binding, "r", None) or getattr(data_binding, "r_col", None) if data_binding else None)
+    _time_col = time_col or (getattr(data_binding, "time", None) or getattr(data_binding, "time_col", None) if data_binding else None)
+    _entity_col = entity_col or (getattr(data_binding, "entity", None) or getattr(data_binding, "entity_col", None) if data_binding else None)
+    _group_col = group_col or (getattr(data_binding, "group", None) or getattr(data_binding, "group_col", None) if data_binding else None)
 
     # Timing
     total_time = getattr(timing, "total_time", 25.0) if timing else 25.0
@@ -450,12 +479,12 @@ def generate_bubble_chart(
     # Parse data
     data = parse_csv_data(
         csv_path=csv_path,
-        x_col=x_col or "x",
-        y_col=y_col or "y",
-        r_col=r_col or "r",
-        time_col=time_col or "time",
-        entity_col=entity_col or "entity",
-        group_col=group_col or "group",
+        x_col=_x_col or "x",
+        y_col=_y_col or "y",
+        r_col=_r_col or "r",
+        time_col=_time_col or "time",
+        entity_col=_entity_col or "entity",
+        group_col=_group_col or "group",
         colors=custom_colors,
     )
 

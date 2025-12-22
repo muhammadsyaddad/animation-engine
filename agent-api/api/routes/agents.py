@@ -2,7 +2,7 @@ from cmath import e
 import os
 from enum import Enum
 from logging import getLogger
-from typing import AsyncGenerator, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 import json
 import time
 import traceback
@@ -14,7 +14,7 @@ from starlette.responses import Content
 from agno.agent import Agent, AgentKnowledge
 from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents.agno_assist import get_agno_assist_knowledge
 from agents.selector import AgentType, get_agent, get_available_agents
@@ -24,7 +24,10 @@ from agents.tools.video_manim import render_manim_stream
 from agents.tools.export_ffmpeg import export_merge_stream
 from sqlalchemy.orm import Session
 from api.settings import api_settings
-from api.run_registry import create_run, set_state, RunState, complete_run, fail_run, cancel_run, get_run, list_runs
+from api.run_registry import (
+    create_run, set_state, RunState, complete_run, fail_run, cancel_run, get_run, list_runs,
+    set_pending_template_selection, get_pending_template_selection, clear_pending_template_selection,
+)
 from db.session import get_db
 
 from api.routes.auth import get_current_user_optional
@@ -44,6 +47,21 @@ from api.session_context import (
     get_session_context,
     update_session_context,
     AnimationContext,
+)
+
+# Template suggestions module
+from api.template_suggestions import (
+    TemplateSuggestionEvents,
+    TemplateSuggestionsPayload,
+    build_template_suggestions_from_inference,
+    format_dataset_summary,
+    validate_template_selection,
+)
+
+# Column mapping validation
+from api.routes.templates import (
+    validate_column_mappings_with_schema,
+    get_smart_column_suggestions,
 )
 
 logger = getLogger(__name__)
@@ -411,12 +429,34 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                 intent = detect_animation_intent(body.message, csv_path=csv_path_for_intent)
                 should_animate = bool(getattr(intent, "animation_requested", False))
                 detected_chart_type = getattr(intent, "chart_type", "unknown")
+
+                # FIX: If user attached a CSV dataset, treat as animation intent
+                # even if message has typos (e.g., "animtae" instead of "animate")
+                if not should_animate and csv_path_for_intent:
+                    logger.info(f"CSV attachment detected, forcing animation intent: {csv_path_for_intent}")
+                    should_animate = True
+                    # Try to infer chart type from data if we haven't already
+                    if detected_chart_type == "unknown":
+                        try:
+                            from agents.tools.chart_inference import recommend_chart
+                            from api.services.data_modules import resolve_csv_path
+                            resolved_path = resolve_csv_path(csv_path_for_intent)
+                            if os.path.exists(resolved_path):
+                                recs = recommend_chart(resolved_path, body.message)
+                                if recs and recs[0].score >= 0.3:
+                                    detected_chart_type = recs[0].chart_type
+                        except Exception:
+                            pass
             except Exception:
                 # Fallback heuristic if intent module unavailable
                 text = (body.message or "")
                 cues = ["class GenScene", "manim", "animasi", "animate", "animation", "video", "mp4", "gif"]
                 lowered = text.lower()
                 should_animate = any(c.lower() in lowered for c in cues)
+                # Also check if CSV is attached in the fallback
+                csv_path_for_intent = getattr(body, "csv_path", None)
+                if not should_animate and csv_path_for_intent:
+                    should_animate = True
         if not should_animate:
             # Fall back to normal chat stream (no animation pipeline)
             try:
@@ -587,6 +627,14 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         "csv_path": body.csv_path,
                     })
 
+                # Log diagnostic info before preprocessing check
+                plog.info(PipelineStep.DATA_PREPROCESSING, "Checking raw_dataset_path", {
+                    "raw_dataset_path": raw_dataset_path,
+                    "raw_dataset_path_type": type(raw_dataset_path).__name__ if raw_dataset_path else "None",
+                    "body_csv_path": getattr(body, "csv_path", None),
+                    "will_preprocess": bool(raw_dataset_path and isinstance(raw_dataset_path, str)),
+                })
+
                 if raw_dataset_path and isinstance(raw_dataset_path, str):
                     try:
                         import os
@@ -598,11 +646,17 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         })
 
                         # Map /static path to filesystem if needed
+                        _original_path = raw_dataset_path
                         raw_dataset_path = resolve_csv_path(raw_dataset_path)
-                        plog.debug(PipelineStep.DATA_PREPROCESSING, "Resolved CSV path", {
-                            "fs_path": raw_dataset_path,
+                        _path_exists = os.path.exists(raw_dataset_path)
+                        plog.info(PipelineStep.DATA_PREPROCESSING, "Path resolution result", {
+                            "original_path": _original_path,
+                            "resolved_path": raw_dataset_path,
+                            "path_changed": _original_path != raw_dataset_path,
+                            "file_exists": _path_exists,
+                            "cwd": os.getcwd(),
                         })
-                        if os.path.exists(raw_dataset_path):
+                        if _path_exists:
                             # Detect header row for World Bank and similar formats
                             header_row = detect_header_row(raw_dataset_path)
                             plog.debug(PipelineStep.DATA_PREPROCESSING, "Detected header row", {
@@ -881,6 +935,22 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                     if session_id:
                                         melt_err_payload["session_id"] = session_id
                                     yield f"data: {json.dumps(melt_err_payload)}\n\n"
+                        else:
+                            # File does not exist at resolved path - log this important condition
+                            plog.warning(PipelineStep.DATA_PREPROCESSING, "Dataset file not found - preprocessing SKIPPED", {
+                                "resolved_path": raw_dataset_path,
+                                "original_path": _original_path,
+                                "path_was_resolved": _original_path != raw_dataset_path,
+                            })
+                            skip_payload = {
+                                "event": "RunContent",
+                                "content": f"⚠️ Dataset file not found at resolved path: {raw_dataset_path}",
+                                "created_at": int(time.time()),
+                                "run_id": run_id,
+                            }
+                            if session_id:
+                                skip_payload["session_id"] = session_id
+                            yield f"data: {json.dumps(skip_payload)}\n\n"
                     except Exception as _pe:
                         plog.error(PipelineStep.DATA_PREPROCESSING, f"Preprocessing failed: {_pe}", {
                             "raw_dataset_path": raw_dataset_path,
@@ -899,6 +969,17 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                 spec = None
                 explicit_chart = False
                 requested_ct = None
+
+                # Diagnostic: Log state before spec inference
+                plog.info(PipelineStep.DATA_PREPROCESSING, "Pre-spec-inference state", {
+                    "provisional_binding_set": provisional_binding is not None,
+                    "provisional_binding": provisional_binding,
+                    "melted_dataset_path": melted_dataset_path,
+                    "dataset_melt_applied": dataset_melt_applied,
+                    "body_chart_type": getattr(body, "chart_type", None),
+                    "auto_select_templates": api_settings.auto_select_templates,
+                })
+
                 try:
                     import os, re, csv
                     from agents.tools.specs import infer_spec_from_prompt  # type: ignore
@@ -912,8 +993,21 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                         generate_single_numeric_code,
                     )  # type: ignore
                     # Pass csv_path for data-driven inference
+                    # Also pass auto_select_templates setting to control whether we auto-infer chart type
+                    # When auto_select_templates=False, infer_spec_from_prompt returns "unknown" chart_type
+                    # which triggers the template suggestion flow later in the pipeline
                     dataset_path_for_spec = getattr(body, "csv_path", None)
-                    spec = infer_spec_from_prompt(msg, csv_path=dataset_path_for_spec)
+                    spec = infer_spec_from_prompt(
+                        msg,
+                        csv_path=dataset_path_for_spec,
+                        auto_select_templates=api_settings.auto_select_templates,
+                    )
+
+                    plog.info(PipelineStep.DATA_PREPROCESSING, "Spec inference complete", {
+                        "spec_is_none": spec is None,
+                        "spec_chart_type": getattr(spec, "chart_type", None) if spec else None,
+                        "spec_has_data_binding": hasattr(spec, "data_binding") if  spec else False,
+                    })
                     # Inject melted dataset bindings BEFORE template routing if available
                     try:
                         if provisional_binding and hasattr(spec, "data_binding"):
@@ -945,9 +1039,100 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                 try:
                                     from agents.tools.chart_inference import recommend_chart
                                     _infer_path = dataset_path_for_spec or melted_dataset_path
+                                    # Resolve /static/... URL paths to filesystem paths
+                                    if _infer_path and isinstance(_infer_path, str) and _infer_path.startswith("/static/"):
+                                        _artifacts_root = os.path.join(os.getcwd(), "artifacts")
+                                        _rel_inside = _infer_path[len("/static/"):].lstrip("/")
+                                        _fs_candidate = os.path.join(_artifacts_root, _rel_inside)
+                                        if os.path.exists(_fs_candidate):
+                                            _infer_path = _fs_candidate
                                     if _infer_path and os.path.exists(_infer_path):
                                         _recs = recommend_chart(_infer_path, msg)
                                         if _recs and _recs[0].score >= 0.5:
+                                            # Check if auto-selection is disabled
+                                            # If disabled, emit template suggestions and pause
+                                            if not api_settings.auto_select_templates:
+                                                # Build template suggestions from inference
+                                                plog.info(PipelineStep.DATA_PREPROCESSING, "Auto-select disabled, emitting template suggestions", {
+                                                    "top_recommendation": _recs[0].chart_type,
+                                                    "confidence": _recs[0].score,
+                                                    "num_recommendations": len(_recs),
+                                                })
+
+                                                # Format dataset summary for display (include schema info for frontend validation)
+                                                _dataset_summary = None
+                                                try:
+                                                    from agents.tools.chart_inference import get_schema_summary
+                                                    _schema_info = get_schema_summary(_infer_path)
+                                                    _dataset_summary = format_dataset_summary(
+                                                        csv_path=_infer_path,
+                                                        row_count=_schema_info.get("row_count"),
+                                                        column_names=_schema_info.get("columns"),
+                                                        numeric_columns=_schema_info.get("numeric_columns"),
+                                                        categorical_columns=_schema_info.get("categorical_columns"),
+                                                        time_column=_schema_info.get("time_column"),
+                                                        is_wide_format=_schema_info.get("is_wide_format"),
+                                                    )
+                                                except Exception:
+                                                    pass
+
+                                                # Build and emit template suggestions
+                                                _suggestions_payload = build_template_suggestions_from_inference(
+                                                    recommendations=_recs,
+                                                    run_id=run_id,
+                                                    session_id=session_id,
+                                                    dataset_summary=_dataset_summary,
+                                                )
+
+                                                # Store pending state in run registry (always available by run_id)
+                                                set_pending_template_selection(
+                                                    run_id=run_id,
+                                                    suggestions=[s.to_dict() for s in _suggestions_payload.suggestions],
+                                                    original_message=msg,
+                                                    csv_path=_infer_path,
+                                                    data_binding=provisional_binding,
+                                                )
+
+                                                # Also store in session context if session_id is available
+                                                if session_id:
+                                                    update_session_context(
+                                                        session_id=session_id,
+                                                        pending_template_suggestions=[s.to_dict() for s in _suggestions_payload.suggestions],
+                                                        pending_run_id=run_id,
+                                                        pending_original_message=msg,
+                                                        data_binding=provisional_binding,
+                                                    )
+
+                                                # Update run state to awaiting selection
+                                                set_state(run_id, RunState.AWAITING_TEMPLATE_SELECTION, "Waiting for template selection")
+                                                try:
+                                                    persist_run_state(run_id, "AWAITING_TEMPLATE_SELECTION", "Waiting for template selection")
+                                                except Exception:
+                                                    pass
+
+                                                # Emit the template suggestions event
+                                                yield _suggestions_payload.to_sse_string()
+
+                                                # Emit a RunPaused event to signal the frontend
+                                                paused_payload = {
+                                                    "event": "RunPaused",
+                                                    "content": "Please select a template to continue.",
+                                                    "run_id": run_id,
+                                                    "created_at": int(time.time()),
+                                                    "awaiting": "template_selection",
+                                                }
+                                                if session_id:
+                                                    paused_payload["session_id"] = session_id
+                                                yield f"data: {json.dumps(paused_payload)}\n\n"
+
+                                                # End the SSE stream here - user must select a template
+                                                plog.info(PipelineStep.DATA_PREPROCESSING, "Pipeline paused awaiting template selection", {
+                                                    "run_id": run_id,
+                                                    "suggestions_count": len(_suggestions_payload.suggestions),
+                                                })
+                                                return
+
+                                            # Auto-selection is enabled, proceed as before
                                             spec.chart_type = _recs[0].chart_type
                                             smart_payload = {
                                                 "event": "RunContent",
@@ -1017,12 +1202,155 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                 requested_ct = ct
                     except Exception:
                         pass
+
+                    # Diagnostic: Log state before template suggestion check
+                    plog.info(PipelineStep.DATA_PREPROCESSING, "Pre-template-suggestion state", {
+                        "spec_chart_type": getattr(spec, "chart_type", None) if spec else None,
+                        "explicit_chart": explicit_chart,
+                        "requested_ct": requested_ct,
+                        "auto_select_templates": api_settings.auto_select_templates,
+                        "will_check_suggestions": not api_settings.auto_select_templates and not explicit_chart,
+                        "dataset_path_for_spec": dataset_path_for_spec,
+                        "melted_dataset_path": melted_dataset_path,
+                    })
                     # Apply creation_mode override if provided (bubble template controller)
                     try:
                         if getattr(body, "creation_mode", None) is not None:
                             spec.creation_mode = int(body.creation_mode)
                     except Exception:
                         pass
+
+                    # =========================================================
+                    # TEMPLATE SUGGESTION CHECK (AUTO-SELECT BYPASS FIX)
+                    # =========================================================
+                    # This check runs AFTER spec inference but BEFORE code generation.
+                    # If auto_select_templates is disabled and user didn't explicitly
+                    # provide a chart_type, we emit template suggestions and pause.
+                    # =========================================================
+                    if not api_settings.auto_select_templates and not explicit_chart:
+                        # Get dataset path for chart inference
+                        _suggestion_dataset_path = dataset_path_for_spec or melted_dataset_path
+                        _original_suggestion_path = _suggestion_dataset_path
+
+                        # Resolve /static/ URL paths to filesystem paths
+                        if _suggestion_dataset_path and isinstance(_suggestion_dataset_path, str) and _suggestion_dataset_path.startswith("/static/"):
+                            _artifacts_root = os.path.join(os.getcwd(), "artifacts")
+                            _rel_inside = _suggestion_dataset_path[len("/static/"):].lstrip("/")
+                            _fs_candidate = os.path.join(_artifacts_root, _rel_inside)
+                            _candidate_exists = os.path.exists(_fs_candidate)
+                            plog.info(PipelineStep.DATA_PREPROCESSING, "Template suggestion path resolution", {
+                                "original_path": _original_suggestion_path,
+                                "fs_candidate": _fs_candidate,
+                                "candidate_exists": _candidate_exists,
+                            })
+                            if _candidate_exists:
+                                _suggestion_dataset_path = _fs_candidate
+
+                        _final_path_exists = _suggestion_dataset_path and os.path.exists(_suggestion_dataset_path) if _suggestion_dataset_path else False
+                        plog.info(PipelineStep.DATA_PREPROCESSING, "Template suggestion path check", {
+                            "suggestion_dataset_path": _suggestion_dataset_path,
+                            "path_exists": _final_path_exists,
+                            "will_generate_suggestions": _final_path_exists,
+                        })
+
+                        if _suggestion_dataset_path and _final_path_exists:
+                            try:
+                                from agents.tools.chart_inference import recommend_chart
+                                _recs = recommend_chart(_suggestion_dataset_path, msg)
+                                if _recs and len(_recs) > 0:
+                                    plog.info(PipelineStep.DATA_PREPROCESSING, "Auto-select disabled, emitting template suggestions", {
+                                        "inferred_chart_type": spec.chart_type,
+                                        "top_recommendation": _recs[0].chart_type,
+                                        "confidence": _recs[0].score,
+                                        "num_recommendations": len(_recs),
+                                    })
+
+                                    # Format dataset summary for display
+                                    _dataset_summary = None
+                                    try:
+                                        from agents.tools.chart_inference import get_schema_summary
+                                        _schema_info = get_schema_summary(_suggestion_dataset_path)
+                                        _dataset_summary = format_dataset_summary(
+                                            csv_path=_suggestion_dataset_path,
+                                            row_count=_schema_info.get("row_count"),
+                                            column_names=_schema_info.get("columns"),
+                                            numeric_columns=_schema_info.get("numeric_columns"),
+                                            categorical_columns=_schema_info.get("categorical_columns"),
+                                            time_column=_schema_info.get("time_column"),
+                                            is_wide_format=_schema_info.get("is_wide_format"),
+                                        )
+                                    except Exception:
+                                        pass
+
+                                    # Build and emit template suggestions
+                                    _suggestions_payload = build_template_suggestions_from_inference(
+                                        recommendations=_recs,
+                                        run_id=run_id,
+                                        session_id=session_id,
+                                        dataset_summary=_dataset_summary,
+                                    )
+
+                                    # Store pending state in run registry (always available by run_id)
+                                    set_pending_template_selection(
+                                        run_id=run_id,
+                                        suggestions=[s.to_dict() for s in _suggestions_payload.suggestions],
+                                        original_message=msg,
+                                        csv_path=_suggestion_dataset_path,
+                                        data_binding=provisional_binding,
+                                    )
+
+                                    # Also store in session context if session_id is available
+                                    if session_id:
+                                        update_session_context(
+                                            session_id=session_id,
+                                            pending_template_suggestions=[s.to_dict() for s in _suggestions_payload.suggestions],
+                                            pending_run_id=run_id,
+                                            pending_original_message=msg,
+                                            data_binding=provisional_binding,
+                                        )
+
+                                    # Update run state to awaiting selection
+                                    set_state(run_id, RunState.AWAITING_TEMPLATE_SELECTION, "Waiting for template selection")
+                                    try:
+                                        persist_run_state(run_id, "AWAITING_TEMPLATE_SELECTION", "Waiting for template selection")
+                                    except Exception:
+                                        pass
+
+                                    # Emit the template suggestions event
+                                    yield _suggestions_payload.to_sse_string()
+
+                                    # Emit a RunPaused event to signal the frontend
+                                    paused_payload = {
+                                        "event": "RunPaused",
+                                        "content": "Please select a template to continue.",
+                                        "run_id": run_id,
+                                        "created_at": int(time.time()),
+                                        "awaiting": "template_selection",
+                                    }
+                                    if session_id:
+                                        paused_payload["session_id"] = session_id
+                                    yield f"data: {json.dumps(paused_payload)}\n\n"
+
+                                    # End the SSE stream here - user must select a template
+                                    plog.info(PipelineStep.DATA_PREPROCESSING, "Pipeline paused awaiting template selection", {
+                                        "run_id": run_id,
+                                        "suggestions_count": len(_suggestions_payload.suggestions),
+                                    })
+                                    return
+                            except Exception as _suggest_err:
+                                plog.warning(PipelineStep.DATA_PREPROCESSING, f"Template suggestion generation failed: {_suggest_err}", {
+                                    "error": str(_suggest_err),
+                                    "error_type": type(_suggest_err).__name__,
+                                })
+                                # Continue with auto-selection on error
+                    else:
+                        # Log why template suggestions were skipped
+                        plog.info(PipelineStep.DATA_PREPROCESSING, "Template suggestion check SKIPPED", {
+                            "reason": "explicit_chart is True" if explicit_chart else "auto_select_templates is True",
+                            "auto_select_templates": api_settings.auto_select_templates,
+                            "explicit_chart": explicit_chart,
+                        })
+
                     # Extract csv_path and optional csv_dir for Danim-style X/Y/R
                     m_path = re.search(r"csv_path\s*=\s*([^\s]+)", msg)
                     m_dir = re.search(r"csv_dir\s*=\s*([^\s]+)", msg)
@@ -1318,6 +1646,89 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                     from agents.tools.chart_inference import recommend_chart
                                     _recs = recommend_chart(dataset_path, msg)
                                     if _recs and _recs[0].score >= 0.5:
+                                        # Check if auto-selection is disabled (fallback path)
+                                        if not api_settings.auto_select_templates:
+                                            # Build template suggestions from inference
+                                            plog.info(PipelineStep.DATA_PREPROCESSING, "Auto-select disabled (fallback path), emitting template suggestions", {
+                                                "top_recommendation": _recs[0].chart_type,
+                                                "confidence": _recs[0].score,
+                                                "num_recommendations": len(_recs),
+                                            })
+
+                                            # Format dataset summary for display
+                                            _dataset_summary = None
+                                            try:
+                                                from agents.tools.chart_inference import get_schema_summary
+                                                _schema_info = get_schema_summary(dataset_path)
+                                                _dataset_summary = format_dataset_summary(
+                                                    csv_path=dataset_path,
+                                                    row_count=_schema_info.get("row_count"),
+                                                    column_names=_schema_info.get("columns"),
+                                                    numeric_columns=_schema_info.get("numeric_columns"),
+                                                    categorical_columns=_schema_info.get("categorical_columns"),
+                                                    time_column=_schema_info.get("time_column"),
+                                                    is_wide_format=_schema_info.get("is_wide_format"),
+                                                )
+                                            except Exception:
+                                                pass
+
+                                            # Build and emit template suggestions
+                                            _suggestions_payload = build_template_suggestions_from_inference(
+                                                recommendations=_recs,
+                                                run_id=run_id,
+                                                session_id=session_id,
+                                                dataset_summary=_dataset_summary,
+                                            )
+
+                                            # Store pending state in run registry (always available by run_id)
+                                            set_pending_template_selection(
+                                                run_id=run_id,
+                                                suggestions=[s.to_dict() for s in _suggestions_payload.suggestions],
+                                                original_message=msg,
+                                                csv_path=dataset_path,
+                                                data_binding=provisional_binding,
+                                            )
+
+                                            # Also store in session context if session_id is available
+                                            if session_id:
+                                                update_session_context(
+                                                    session_id=session_id,
+                                                    pending_template_suggestions=[s.to_dict() for s in _suggestions_payload.suggestions],
+                                                    pending_run_id=run_id,
+                                                    pending_original_message=msg,
+                                                    data_binding=provisional_binding,
+                                                )
+
+                                            # Update run state to awaiting selection
+                                            set_state(run_id, RunState.AWAITING_TEMPLATE_SELECTION, "Waiting for template selection")
+                                            try:
+                                                persist_run_state(run_id, "AWAITING_TEMPLATE_SELECTION", "Waiting for template selection")
+                                            except Exception:
+                                                pass
+
+                                            # Emit the template suggestions event
+                                            yield _suggestions_payload.to_sse_string()
+
+                                            # Emit a RunPaused event to signal the frontend
+                                            paused_payload = {
+                                                "event": "RunPaused",
+                                                "content": "Please select a template to continue.",
+                                                "run_id": run_id,
+                                                "created_at": int(time.time()),
+                                                "awaiting": "template_selection",
+                                            }
+                                            if session_id:
+                                                paused_payload["session_id"] = session_id
+                                            yield f"data: {json.dumps(paused_payload)}\n\n"
+
+                                            # End the SSE stream here - user must select a template
+                                            plog.info(PipelineStep.DATA_PREPROCESSING, "Pipeline paused awaiting template selection (fallback path)", {
+                                                "run_id": run_id,
+                                                "suggestions_count": len(_suggestions_payload.suggestions),
+                                            })
+                                            return
+
+                                        # Auto-selection is enabled, proceed as before
                                         inferred_type = _recs[0].chart_type
                                         spec.chart_type = inferred_type
                                         infer_payload = {
@@ -1439,7 +1850,12 @@ async def create_agent_run(agent_id: AgentType, body: RunRequest, current_user=D
                                     status["run_id"] = run_id
                                     yield f"data: {json.dumps(status)}\n\n"
                 except Exception as e:
-                    template_error = f"Spec inference unavailable: {e}"
+                    teamplate_error = f"spec inference unavailable: {e}"
+                    plog.error(PipelineStep.DATA_PREPROCESSING, f"Teamplate preprocesing is failed {e}", {
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                    }, exception=e)
+
                 if template_error:
                     # If user explicitly requested a template, treat template errors as terminal (no LLM fallback)
                     if explicit_chart and (requested_ct in ("bubble", "distribution", "bar_race")):
@@ -1972,6 +2388,789 @@ async def list_all_runs():
     List all known runs with their current state and metadata.
     """
     return list_runs()
+
+
+class TemplateSelectionRequest(BaseModel):
+    """Request model for selecting a template."""
+    template_id: str = Field(..., description="The template ID to use (e.g., 'bar_race', 'bubble')")
+    session_id: Optional[str] = Field(None, description="The session ID")
+    column_mapping: Optional[Dict[str, Optional[str]]] = Field(
+        None,
+        description="User-specified column mappings for the template (e.g., {'time_col': 'year', 'value_col': 'sales'})"
+    )
+
+
+@agents_router.post("/runs/{run_id}/select_template", status_code=status.HTTP_200_OK)
+async def select_template_for_run(
+    run_id: str,
+    body: TemplateSelectionRequest,
+    current_user=Depends(get_current_user_optional),
+):
+    """
+    Select a template for a run that is awaiting template selection.
+
+    This endpoint is used when the auto_select_templates setting is disabled
+    and the system has emitted a TemplateSuggestions event. The user selects
+    a template and this endpoint resumes the animation pipeline.
+
+    Args:
+        run_id: The run ID that is awaiting template selection
+        body: The template selection request
+
+    Returns:
+        StreamingResponse with the animation pipeline SSE events
+    """
+    # Initialize pipeline logger early for request tracking
+    plog_init = get_pipeline_logger(run_id=run_id)
+    plog_init.info(PipelineStep.REQUEST_RECEIVED, "Template selection request received", {
+        "run_id": run_id,
+        "template_id": body.template_id,
+        "session_id": body.session_id,
+        "column_mapping": body.column_mapping,
+    })
+
+    # Validate template selection
+    is_valid, error_msg = validate_template_selection(body.template_id)
+    if not is_valid:
+        plog_init.warning(PipelineStep.REQUEST_VALIDATED, f"Invalid template selection: {error_msg}", {
+            "template_id": body.template_id,
+        })
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg)
+
+    plog_init.info(PipelineStep.REQUEST_VALIDATED, "Template selection validated", {
+        "template_id": body.template_id,
+    })
+
+    # Get the run info
+    run_info = get_run(run_id)
+    if not run_info:
+        plog_init.error(PipelineStep.RUN_FAILED, "Run not found", {"run_id": run_id})
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    plog_init.debug(PipelineStep.REQUEST_VALIDATED, "Run info retrieved", {
+        "run_state": run_info.state.name if run_info.state else "unknown",
+        "session_id": run_info.session_id,
+    })
+
+    # Check if run is in the correct state
+    if run_info.state != RunState.AWAITING_TEMPLATE_SELECTION:
+        plog_init.warning(PipelineStep.RUN_FAILED, "Run not in correct state for template selection", {
+            "current_state": run_info.state.name if run_info.state else "unknown",
+            "expected_state": "AWAITING_TEMPLATE_SELECTION",
+        })
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Run is not awaiting template selection. Current state: {run_info.state.name}"
+        )
+
+    # Get pending data from run registry (primary) or session context (fallback)
+    plog_init.debug(PipelineStep.DATA_BINDING, "Retrieving pending template selection data", {
+        "run_id": run_id,
+    })
+    pending_data = get_pending_template_selection(run_id)
+    session_id = body.session_id or run_info.session_id
+
+    plog_init.debug(PipelineStep.DATA_BINDING, "Session ID resolved", {
+        "session_id": session_id,
+        "from_body": bool(body.session_id),
+        "from_run_info": bool(run_info.session_id),
+    })
+
+    # Always get session context if session_id exists (needed for data_binding later)
+    session_ctx = get_session_context(session_id) if session_id else None
+
+    plog_init.debug(PipelineStep.DATA_BINDING, "Session context lookup", {
+        "session_ctx_exists": session_ctx is not None,
+        "has_data_binding": bool(session_ctx and session_ctx.data_binding) if session_ctx else False,
+    })
+
+    # Track where we got the data from, so we can clear it after successful validation
+    pending_data_source = None  # Will be "run_registry" or "session_context"
+
+    if pending_data:
+        # Use run-based storage (more reliable, doesn't require session_id)
+        original_message = pending_data.get("original_message") or ""
+        csv_path = pending_data.get("csv_path")
+        plog_init.info(PipelineStep.DATA_BINDING, "Retrieved pending data from run registry", {
+            "csv_path": csv_path,
+            "original_message_length": len(original_message),
+            "data_binding": pending_data.get("data_binding"),
+        })
+        # NOTE: Don't clear pending state yet - wait until validation passes
+        # This allows users to retry with corrected mappings if validation fails
+        pending_data_source = "run_registry"
+    else:
+        # Fallback to session context (for backward compatibility)
+        plog_init.warning(PipelineStep.DATA_BINDING, "No pending data in run registry, trying session context", {
+            "session_id": session_id,
+        })
+        if not session_ctx or not session_ctx.has_pending_template_selection():
+            plog_init.error(PipelineStep.RUN_FAILED, "No pending template selection found", {
+                "run_id": run_id,
+                "session_id": session_id,
+                "session_ctx_exists": session_ctx is not None,
+            })
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No pending template selection found for this run"
+            )
+
+        # Get the pending data from session context
+        original_message = session_ctx.pending_original_message or ""
+        csv_path = session_ctx.get_effective_csv_path()
+        plog_init.info(PipelineStep.DATA_BINDING, "Retrieved pending data from session context", {
+            "csv_path": csv_path,
+            "original_message_length": len(original_message),
+        })
+
+        # NOTE: Don't clear pending state yet - wait until validation passes
+        # This allows users to retry with corrected mappings if validation fails
+        pending_data_source = "session_context"
+
+    # Update the session context with the selected chart type (if session exists)
+    if session_id:
+        update_session_context(
+            session_id=session_id,
+            chart_type=body.template_id,
+        )
+        plog_init.debug(PipelineStep.DATA_BINDING, "Updated session context with selected template", {
+            "template_id": body.template_id,
+        })
+
+    plog_init.info(PipelineStep.TEMPLATE_SELECTED, "Template selection validated, starting pipeline resume", {
+        "template_id": body.template_id,
+        "csv_path": csv_path,
+        "session_id": session_id,
+    })
+
+    # =========================================================================
+    # COLUMN MAPPING VALIDATION
+    # Validate that user-provided column mappings are compatible with the
+    # template requirements AND the actual dataset schema.
+    # =========================================================================
+
+    # Create a mutable copy of column mappings that we can augment
+    effective_column_mapping = dict(body.column_mapping) if body.column_mapping else {}
+
+    if csv_path:
+        plog_init.info(PipelineStep.DATA_BINDING, "Validating column mappings against dataset schema", {
+            "template_id": body.template_id,
+            "column_mapping": effective_column_mapping,
+            "csv_path": csv_path,
+        })
+
+        # Get schema information from chart inference
+        try:
+            from agents.tools.chart_inference import analyze_schema
+
+            # Resolve the CSV path
+            resolved_csv_path = csv_path
+            if csv_path.startswith("/static/"):
+                resolved_csv_path = csv_path.replace("/static/", "artifacts/", 1)
+                if not os.path.isabs(resolved_csv_path):
+                    resolved_csv_path = os.path.join(os.getcwd(), resolved_csv_path)
+
+            if os.path.exists(resolved_csv_path):
+                schema = analyze_schema(resolved_csv_path)
+
+                # =========================================================
+                # AUTO-FILL MISSING REQUIRED MAPPINGS
+                # If the user didn't provide a time_column but the schema
+                # detected one, auto-fill it to reduce friction
+                # =========================================================
+                from api.routes.templates import get_smart_column_suggestions, TEMPLATES_BY_ID
+
+                template_def = TEMPLATES_BY_ID.get(body.template_id)
+                if template_def:
+                    # Get smart suggestions for this template
+                    smart_suggestions = get_smart_column_suggestions(
+                        template_id=body.template_id,
+                        numeric_columns=schema.numeric_columns,
+                        categorical_columns=schema.categorical_columns,
+                        time_column=schema.time_column,
+                    )
+
+                    # Auto-fill missing required mappings with suggestions
+                    auto_filled = []
+                    for axis in template_def.axes:
+                        if not axis.required:
+                            continue
+
+                        # Check if this axis is already mapped
+                        axis_name = axis.name
+                        short_name = axis_name.replace("_column", "_col")
+
+                        is_mapped = (
+                            effective_column_mapping.get(axis_name) or
+                            effective_column_mapping.get(short_name)
+                        )
+
+                        if not is_mapped and axis_name in smart_suggestions:
+                            # Auto-fill this mapping
+                            effective_column_mapping[axis_name] = smart_suggestions[axis_name]
+                            auto_filled.append(f"{axis_name}={smart_suggestions[axis_name]}")
+
+                    if auto_filled:
+                        plog_init.info(PipelineStep.DATA_BINDING, "Auto-filled missing required mappings", {
+                            "auto_filled": auto_filled,
+                            "effective_mapping": effective_column_mapping,
+                        })
+
+                # Validate column mappings against template requirements and schema
+                validation_result = validate_column_mappings_with_schema(
+                    template_id=body.template_id,
+                    mappings=effective_column_mapping,
+                    csv_path=csv_path,
+                    numeric_columns=schema.numeric_columns,
+                    categorical_columns=schema.categorical_columns,
+                    time_column=schema.time_column,
+                    all_columns=schema.columns,
+                    is_wide_format=schema.is_wide_format,
+                )
+
+                if not validation_result.is_valid:
+                    plog_init.error(PipelineStep.DATA_BINDING, "Column mapping validation failed", {
+                        "errors": validation_result.errors,
+                        "warnings": validation_result.warnings,
+                        "suggestions": validation_result.suggestions,
+                    })
+
+                    # Build a helpful error message with suggestions
+                    error_details = {
+                        "message": "Invalid column mappings for the selected template.",
+                        "errors": validation_result.errors,
+                        "suggestions": validation_result.suggestions,
+                        "available_columns": {
+                            "numeric": schema.numeric_columns[:10],
+                            "categorical": schema.categorical_columns[:10],
+                            "time": schema.time_column,
+                        },
+                    }
+
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=error_details,
+                    )
+
+                # Log warnings if any
+                if validation_result.warnings:
+                    plog_init.warning(PipelineStep.DATA_BINDING, "Column mapping warnings", {
+                        "warnings": validation_result.warnings,
+                    })
+
+                plog_init.info(PipelineStep.DATA_BINDING, "Column mapping validation passed", {
+                    "template_id": body.template_id,
+                })
+
+                # NOW clear pending state - validation passed, so user won't need to retry
+                if pending_data_source == "run_registry":
+                    clear_pending_template_selection(run_id)
+                    plog_init.debug(PipelineStep.DATA_BINDING, "Cleared pending state from run registry after successful validation", {})
+                elif pending_data_source == "session_context" and session_ctx:
+                    session_ctx.clear_pending_template_selection()
+                    plog_init.debug(PipelineStep.DATA_BINDING, "Cleared pending state from session context after successful validation", {})
+            else:
+                plog_init.warning(PipelineStep.DATA_BINDING, "Could not validate column mappings - CSV not found", {
+                    "csv_path": csv_path,
+                    "resolved_path": resolved_csv_path,
+                })
+                # Still clear pending state - we're proceeding without validation
+                if pending_data_source == "run_registry":
+                    clear_pending_template_selection(run_id)
+                elif pending_data_source == "session_context" and session_ctx:
+                    session_ctx.clear_pending_template_selection()
+
+        except ImportError as e:
+            plog_init.warning(PipelineStep.DATA_BINDING, f"Could not import chart_inference for validation: {e}", {})
+            # Clear pending state on import error - we're proceeding anyway
+            if pending_data_source == "run_registry":
+                clear_pending_template_selection(run_id)
+            elif pending_data_source == "session_context" and session_ctx:
+                session_ctx.clear_pending_template_selection()
+        except HTTPException:
+            # Re-raise HTTP exceptions - DO NOT clear pending state, user can retry
+            raise
+        except Exception as e:
+            # Log but don't fail - let the pipeline handle validation errors downstream
+            plog_init.warning(PipelineStep.DATA_BINDING, f"Column mapping validation error (non-fatal): {e}", {
+                "error_type": type(e).__name__,
+            })
+            # Clear pending state on non-fatal error - we're proceeding anyway
+            if pending_data_source == "run_registry":
+                clear_pending_template_selection(run_id)
+            elif pending_data_source == "session_context" and session_ctx:
+                session_ctx.clear_pending_template_selection()
+    else:
+        # No column_mapping or csv_path - clear pending state and proceed
+        plog_init.debug(PipelineStep.DATA_BINDING, "Skipping column mapping validation - no mappings or csv_path provided", {
+            "has_column_mapping": bool(body.column_mapping),
+            "has_csv_path": bool(csv_path),
+        })
+        if pending_data_source == "run_registry":
+            clear_pending_template_selection(run_id)
+        elif pending_data_source == "session_context" and session_ctx:
+            session_ctx.clear_pending_template_selection()
+
+    # Resume the animation pipeline with the selected template
+    def resume_animation_sse():
+        registry_user_id = (current_user.id if current_user else "local")
+        db_user_id = (current_user.id if current_user else None)
+        user_id = registry_user_id
+
+        # Initialize pipeline logger
+        plog = get_pipeline_logger(run_id=run_id, session_id=session_id, user_id=user_id)
+        plog.info(PipelineStep.RUN_STARTED, "=== ANIMATION PIPELINE RESUME STARTED ===", {
+            "template_id": body.template_id,
+            "csv_path": csv_path,
+            "user_id": user_id,
+            "column_mapping": effective_column_mapping,
+        })
+
+        # Update run state
+        set_state(run_id, RunState.STARTING, f"Template selected: {body.template_id}")
+        plog.debug(PipelineStep.RUN_STARTED, "Run state updated to STARTING", {})
+        try:
+            persist_run_state(run_id, "STARTING", f"Template selected: {body.template_id}")
+            plog.debug(PipelineStep.RUN_STARTED, "Run state persisted to database", {})
+        except Exception as e:
+            plog.warning(PipelineStep.RUN_STARTED, f"Failed to persist run state: {e}", {})
+
+        # Emit template selected event
+        plog.info(PipelineStep.TEMPLATE_SELECTED, "Emitting template selected SSE event", {
+            "template_id": body.template_id,
+        })
+        selected_payload = {
+            "event": TemplateSuggestionEvents.TEMPLATE_SELECTED,
+            "content": f"Template selected: **{body.template_id}**. Generating animation...",
+            "template_id": body.template_id,
+            "run_id": run_id,
+            "created_at": int(time.time()),
+        }
+        if session_id:
+            selected_payload["session_id"] = session_id
+        yield f"data: {json.dumps(selected_payload)}\n\n"
+
+        # Now generate code using the selected template
+        plog.info(PipelineStep.CODE_GENERATION_START, "=== CODE GENERATION PHASE STARTED ===", {
+            "template_id": body.template_id,
+            "csv_path": csv_path,
+        })
+        try:
+            import os
+            from agents.tools.specs import infer_spec_from_prompt
+            from agents.tools.danim_templates import (
+                generate_bubble_code,
+                generate_distribution_code,
+                generate_bar_race_code,
+                generate_line_evolution_code,
+                generate_bento_grid_code,
+                generate_count_bar_code,
+                generate_single_numeric_code,
+            )
+
+            # Infer spec from original message
+            plog.debug(PipelineStep.SPEC_INFERENCE_START, "Inferring spec from original message", {
+                "original_message_length": len(original_message),
+                "csv_path": csv_path,
+            })
+            spec = infer_spec_from_prompt(original_message, csv_path=csv_path)
+            spec.chart_type = body.template_id
+            plog.info(PipelineStep.SPEC_INFERENCE_COMPLETE, "Spec inference complete", {
+                "chart_type": spec.chart_type,
+                "has_data_binding": hasattr(spec, "data_binding"),
+            })
+
+            # Get user-specified column mapping (if provided)
+            # Use effective_column_mapping which includes auto-filled required mappings
+            col_map = effective_column_mapping or {}
+            plog.debug(PipelineStep.DATA_BINDING, "Column mapping (including auto-filled)", {
+                "col_map": col_map,
+                "has_mapping": bool(col_map),
+            })
+
+            # Restore data binding from session context if available
+            if session_ctx and session_ctx.data_binding:
+                plog.debug(PipelineStep.DATA_BINDING, "Restoring data binding from session context", {
+                    "session_data_binding": session_ctx.data_binding,
+                })
+                if hasattr(spec, "data_binding"):
+                    db = spec.data_binding
+                    binding = session_ctx.data_binding
+                    if binding.get("time_col"):
+                        setattr(db, "time_col", binding["time_col"])
+                    if binding.get("value_col"):
+                        setattr(db, "value_col", binding["value_col"])
+                    if binding.get("group_col"):
+                        setattr(db, "group_col", binding["group_col"])
+                        setattr(db, "entity_col", binding["group_col"])
+                    plog.info(PipelineStep.DATA_BINDING, "Data binding restored from session", {
+                        "time_col": getattr(db, "time_col", None),
+                        "value_col": getattr(db, "value_col", None),
+                        "group_col": getattr(db, "group_col", None),
+                    })
+
+            # Override with user-specified column mappings
+            if col_map and hasattr(spec, "data_binding"):
+                plog.debug(PipelineStep.DATA_BINDING, "Applying user-specified column mappings", {
+                    "col_map": col_map,
+                })
+                db = spec.data_binding
+                if col_map.get("time_col"):
+                    setattr(db, "time_col", col_map["time_col"])
+                if col_map.get("value_col"):
+                    setattr(db, "value_col", col_map["value_col"])
+                if col_map.get("group_col"):
+                    setattr(db, "group_col", col_map["group_col"])
+                if col_map.get("category_col"):
+                    setattr(db, "group_col", col_map["category_col"])
+                    setattr(db, "entity_col", col_map["category_col"])
+                if col_map.get("entity_col"):
+                    setattr(db, "entity_col", col_map["entity_col"])
+                if col_map.get("x_col"):
+                    setattr(db, "x_col", col_map["x_col"])
+                if col_map.get("y_col"):
+                    setattr(db, "y_col", col_map["y_col"])
+                if col_map.get("r_col"):
+                    setattr(db, "r_col", col_map["r_col"])
+                plog.info(PipelineStep.DATA_BINDING, "User column mappings applied to spec", {
+                    "final_time_col": getattr(db, "time_col", None),
+                    "final_value_col": getattr(db, "value_col", None),
+                    "final_group_col": getattr(db, "group_col", None),
+                    "final_x_col": getattr(db, "x_col", None),
+                    "final_y_col": getattr(db, "y_col", None),
+                    "final_r_col": getattr(db, "r_col", None),
+                })
+
+            dataset_path = csv_path
+            code = None
+            use_template = False
+
+            plog.info(PipelineStep.TEMPLATE_GENERATION, "Starting template code generation", {
+                "template_id": body.template_id,
+                "dataset_path": dataset_path,
+                "dataset_exists": os.path.exists(dataset_path) if dataset_path else False,
+            })
+
+            # Generate code based on selected template with user column mappings
+            if body.template_id == "bubble" and dataset_path and os.path.exists(dataset_path):
+                # Bubble chart: x_col, y_col, r_col, entity_col, time_col, group_col
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Generating bubble chart code", {
+                    "x_col": col_map.get("x_col"),
+                    "y_col": col_map.get("y_col"),
+                    "r_col": col_map.get("r_col"),
+                    "entity_col": col_map.get("entity_col"),
+                    "time_col": col_map.get("time_col"),
+                    "group_col": col_map.get("group_col"),
+                })
+                from agents.tools.templates.bubble_chart import generate_bubble_chart
+                code = generate_bubble_chart(
+                    spec, dataset_path,
+                    theme="youtube_dark",
+                    x_col=col_map.get("x_col"),
+                    y_col=col_map.get("y_col"),
+                    r_col=col_map.get("r_col"),
+                    entity_col=col_map.get("entity_col"),
+                    time_col=col_map.get("time_col"),
+                    group_col=col_map.get("group_col"),
+                )
+                use_template = True
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Bubble chart code generated successfully", {
+                    "code_length": len(code) if code else 0,
+                })
+            elif body.template_id == "distribution" and dataset_path and os.path.exists(dataset_path):
+                # Distribution: value_col, group_col
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Generating distribution chart code", {
+                    "value_col": col_map.get("value_col"),
+                    "group_col": col_map.get("group_col"),
+                })
+                from agents.tools.templates.distribution import generate_distribution
+                code = generate_distribution(
+                    spec, dataset_path,
+                    theme="youtube_dark",
+                    value_col=col_map.get("value_col"),
+                    group_col=col_map.get("group_col"),
+                )
+                use_template = True
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Distribution chart code generated successfully", {
+                    "code_length": len(code) if code else 0,
+                })
+            elif body.template_id == "bar_race" and dataset_path and os.path.exists(dataset_path):
+                # Bar race: time_col, value_col, category_col
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Generating bar race chart code", {
+                    "time_col": col_map.get("time_col"),
+                    "value_col": col_map.get("value_col"),
+                    "category_col": col_map.get("category_col"),
+                })
+                from agents.tools.templates.bar_race import generate_bar_race
+                code = generate_bar_race(
+                    spec, dataset_path,
+                    theme="youtube_dark",
+                    time_col=col_map.get("time_col"),
+                    value_col=col_map.get("value_col"),
+                    category_col=col_map.get("category_col"),
+                )
+                use_template = True
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Bar race chart code generated successfully", {
+                    "code_length": len(code) if code else 0,
+                })
+            elif body.template_id == "line_evolution" and dataset_path and os.path.exists(dataset_path):
+                # Line evolution: time_col, value_col, group_col
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Generating line evolution chart code", {
+                    "time_col": col_map.get("time_col"),
+                    "value_col": col_map.get("value_col"),
+                    "group_col": col_map.get("group_col"),
+                })
+                from agents.tools.templates.line_evolution import generate_line_evolution
+                code = generate_line_evolution(
+                    spec, dataset_path,
+                    theme="youtube_dark",
+                    time_col=col_map.get("time_col"),
+                    value_col=col_map.get("value_col"),
+                    group_col=col_map.get("group_col"),
+                )
+                use_template = True
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Line evolution chart code generated successfully", {
+                    "code_length": len(code) if code else 0,
+                })
+            elif body.template_id == "bento_grid" and dataset_path and os.path.exists(dataset_path):
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Generating bento grid code", {})
+                code = generate_bento_grid_code(spec, dataset_path)
+                use_template = True
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Bento grid code generated successfully", {
+                    "code_length": len(code) if code else 0,
+                })
+            elif body.template_id == "count_bar" and dataset_path and os.path.exists(dataset_path):
+                # Count bar: count_column
+                count_col = col_map.get("count_column")
+                if not count_col:
+                    _binding = getattr(spec, "data_binding", None)
+                    count_col = getattr(_binding, "group_col", None) if _binding else None
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Generating count bar chart code", {
+                    "count_column": count_col,
+                })
+                code = generate_count_bar_code(spec, dataset_path, count_column=count_col)
+                use_template = True
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Count bar chart code generated successfully", {
+                    "code_length": len(code) if code else 0,
+                })
+            elif body.template_id == "single_numeric" and dataset_path and os.path.exists(dataset_path):
+                # Single numeric: category_column, value_column
+                cat_col = col_map.get("category_column")
+                val_col = col_map.get("value_column")
+                if not cat_col or not val_col:
+                    _binding = getattr(spec, "data_binding", None)
+                    if not cat_col:
+                        cat_col = getattr(_binding, "group_col", None) if _binding else None
+                    if not val_col:
+                        val_col = getattr(_binding, "value_col", None) if _binding else None
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Generating single numeric chart code", {
+                    "category_column": cat_col,
+                    "value_column": val_col,
+                })
+                code = generate_single_numeric_code(spec, dataset_path, category_column=cat_col, value_column=val_col)
+                use_template = True
+                plog.info(PipelineStep.TEMPLATE_GENERATION, "Single numeric chart code generated successfully", {
+                    "code_length": len(code) if code else 0,
+                })
+
+            if not use_template or not code:
+                # Fallback to LLM code generation
+                plog.warning(PipelineStep.LLM_FALLBACK_START, "Template generation failed or not available, falling back to LLM", {
+                    "template_id": body.template_id,
+                    "use_template": use_template,
+                    "code_generated": bool(code),
+                    "dataset_path": dataset_path,
+                    "dataset_exists": os.path.exists(dataset_path) if dataset_path else False,
+                })
+                status_payload = {
+                    "event": "RunContent",
+                    "content": f"Template {body.template_id} not available for this dataset. Falling back to LLM code generation...",
+                    "created_at": int(time.time()),
+                    "run_id": run_id,
+                }
+                if session_id:
+                    status_payload["session_id"] = session_id
+                yield f"data: {json.dumps(status_payload)}\n\n"
+
+                plog.info(PipelineStep.LLM_API_CALL_START, "Starting LLM code generation", {
+                    "engine": "anthropic",
+                    "prompt_length": len(original_message),
+                })
+                code = generate_manim_code(
+                    prompt=original_message,
+                    engine="anthropic",
+                    model=None,
+                    temperature=0.2,
+                    max_tokens=1200,
+                )
+                plog.info(PipelineStep.LLM_API_CALL_COMPLETE, "LLM code generation complete", {
+                    "code_length": len(code) if code else 0,
+                })
+
+            # Emit code generated event
+            plog.info(PipelineStep.CODE_GENERATION_COMPLETE, "=== CODE GENERATION PHASE COMPLETE ===", {
+                "template_id": body.template_id,
+                "code_length": len(code) if code else 0,
+                "use_template": use_template,
+            })
+            code_payload = {
+                "event": "RunContent",
+                "content": f"Code generated using {body.template_id} template. Starting preview...",
+                "created_at": int(time.time()),
+                "run_id": run_id,
+            }
+            if session_id:
+                code_payload["session_id"] = session_id
+            yield f"data: {json.dumps(code_payload)}\n\n"
+
+            # Now proceed to preview and render (simplified - full implementation continues in main pipeline)
+            # For now, emit the code and mark as ready for preview
+            aspect_ratio = (session_ctx.aspect_ratio if session_ctx else None) or "16:9"
+            preview_sample_every = api_settings.preview_sample_every
+            preview_max_frames = api_settings.preview_max_frames
+            quality = (session_ctx.render_quality if session_ctx else None) or api_settings.default_render_quality
+
+            plog.info(PipelineStep.PREVIEW_START, "=== PREVIEW GENERATION PHASE STARTED ===", {
+                "aspect_ratio": aspect_ratio,
+                "preview_sample_every": preview_sample_every,
+                "preview_max_frames": preview_max_frames,
+            })
+
+            # Generate preview
+            set_state(run_id, RunState.PREVIEWING, "Generating preview...")
+            try:
+                persist_run_state(run_id, "PREVIEWING", "Generating preview...")
+            except Exception as e:
+                plog.warning(PipelineStep.PREVIEW_START, f"Failed to persist preview state: {e}", {})
+
+            preview_frame_count = 0
+            for preview_event in generate_manim_preview_stream(
+                code,
+                run_id=run_id,
+                sample_every=preview_sample_every,
+                max_frames=preview_max_frames,
+                aspect_ratio=aspect_ratio,
+            ):
+                preview_payload = {
+                    "event": preview_event.get("event", "RunContent"),
+                    "content": preview_event.get("content", ""),
+                    "created_at": int(time.time()),
+                    "run_id": run_id,
+                }
+                if session_id:
+                    preview_payload["session_id"] = session_id
+                if "images" in preview_event:
+                    preview_payload["images"] = preview_event["images"]
+                    preview_frame_count += len(preview_event["images"])
+                    plog.debug(PipelineStep.PREVIEW_FRAME_GENERATED, f"Preview frames generated: {preview_frame_count}", {
+                        "frames_in_event": len(preview_event["images"]),
+                    })
+                yield f"data: {json.dumps(preview_payload)}\n\n"
+
+            plog.info(PipelineStep.PREVIEW_COMPLETE, "=== PREVIEW GENERATION PHASE COMPLETE ===", {
+                "total_frames": preview_frame_count,
+            })
+
+            # Generate final video
+            plog.info(PipelineStep.RENDER_START, "=== RENDER PHASE STARTED ===", {
+                "quality": quality,
+                "aspect_ratio": aspect_ratio,
+            })
+            set_state(run_id, RunState.RENDERING, "Rendering final video...")
+            try:
+                persist_run_state(run_id, "RENDERING", "Rendering final video...")
+            except Exception as e:
+                plog.warning(PipelineStep.RENDER_START, f"Failed to persist render state: {e}", {})
+
+            for render_event in render_manim_stream(
+                code,
+                run_id=run_id,
+                quality=quality,
+                aspect_ratio=aspect_ratio,
+                user_id=user_id,
+            ):
+                render_payload = {
+                    "event": render_event.get("event", "RunContent"),
+                    "content": render_event.get("content", ""),
+                    "created_at": int(time.time()),
+                    "run_id": run_id,
+                }
+                if session_id:
+                    render_payload["session_id"] = session_id
+                if "videos" in render_event:
+                    render_payload["videos"] = render_event["videos"]
+                    plog.info(PipelineStep.RENDER_COMPLETE, "Video render complete", {
+                        "video_count": len(render_event["videos"]),
+                        "videos": [v.get("url") if isinstance(v, dict) else str(v) for v in render_event["videos"]],
+                    })
+                    # Persist video artifacts
+                    try:
+                        for v in render_event["videos"]:
+                            storage_path = v.get("url") if isinstance(v, dict) else str(v)
+                            if storage_path:
+                                persist_artifact(run_id, "video", storage_path)
+                                plog.debug(PipelineStep.RENDER_COMPLETE, "Video artifact persisted", {
+                                    "storage_path": storage_path,
+                                })
+                    except Exception as e:
+                        plog.warning(PipelineStep.RENDER_ERROR, f"Failed to persist video artifact: {e}", {})
+                yield f"data: {json.dumps(render_payload)}\n\n"
+
+            # Mark run as completed
+            plog.info(PipelineStep.RUN_COMPLETED, "=== ANIMATION PIPELINE COMPLETED SUCCESSFULLY ===", {
+                "run_id": run_id,
+                "template_id": body.template_id,
+            })
+            complete_run(run_id, "Animation completed successfully.")
+            try:
+                persist_run_completed(run_id, "Animation completed successfully.")
+            except Exception as e:
+                plog.warning(PipelineStep.RUN_COMPLETED, f"Failed to persist run completed: {e}", {})
+
+            final_payload = {
+                "event": "RunCompleted",
+                "content": "Animation completed successfully!",
+                "run_id": run_id,
+                "created_at": int(time.time()),
+            }
+            if session_id:
+                final_payload["session_id"] = session_id
+            yield f"data: {json.dumps(final_payload)}\n\n"
+
+            # Cleanup logger
+            cleanup_logger(run_id)
+
+        except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
+            error_msg = f"Animation pipeline failed: {str(e)}"
+            plog.error(PipelineStep.RUN_FAILED, "=== ANIMATION PIPELINE FAILED ===", {
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "traceback": tb_str,
+                "template_id": body.template_id,
+                "csv_path": csv_path,
+            }, exception=e)
+            fail_run(run_id, error_msg)
+            try:
+                persist_run_failed(run_id, error_msg)
+            except Exception as persist_err:
+                plog.warning(PipelineStep.RUN_FAILED, f"Failed to persist run failure: {persist_err}", {})
+
+            error_payload = {
+                "event": "RunError",
+                "content": error_msg,
+                "run_id": run_id,
+                "created_at": int(time.time()),
+            }
+            if session_id:
+                error_payload["session_id"] = session_id
+            yield f"data: {json.dumps(error_payload)}\n\n"
+
+            # Cleanup logger
+            cleanup_logger(run_id)
+
+    return StreamingResponse(resume_animation_sse(), media_type="text/event-stream")
 
 
 @agents_router.post("/{agent_id}/knowledge/load", status_code=status.HTTP_200_OK)

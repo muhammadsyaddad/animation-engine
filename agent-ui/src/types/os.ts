@@ -100,6 +100,9 @@ export enum RunEvent {
   RunCancelled = 'RunCancelled',
   RunPaused = 'RunPaused',
   RunContinued = 'RunContinued',
+  // Template suggestion events (animation pipeline)
+  TemplateSuggestions = 'TemplateSuggestions',
+  TemplateSelected = 'TemplateSelected',
   // Team Events
   TeamRunStarted = 'TeamRunStarted',
   TeamRunContent = 'TeamRunContent',
@@ -127,6 +130,30 @@ export interface NewRunResponse {
   status: 'RUNNING' | 'PAUSED' | 'CANCELLED'
 }
 
+// Template suggestion types for animation pipeline
+export interface TemplateSuggestion {
+  template_id: string
+  display_name: string
+  description: string
+  preview_url?: string | null
+  preview_fallback_url?: string | null
+  category: string
+  confidence_score: number
+  reasons: string[]
+  is_recommended: boolean
+}
+
+export interface DatasetSummary {
+  filename: string
+  row_count?: number
+  column_count?: number
+  columns?: string[]
+  columns_truncated?: boolean
+  numeric_columns?: string[]
+  categorical_columns?: string[]
+  time_column?: string
+}
+
 export interface RunResponseContent {
   content?: string | object
   content_type: string
@@ -147,6 +174,11 @@ export interface RunResponseContent {
   videos?: VideoData[]
   audio?: AudioData[]
   response_audio?: ResponseAudio
+  // Template suggestion fields (animation pipeline)
+  suggestions?: TemplateSuggestion[]
+  dataset_summary?: DatasetSummary
+  awaiting?: string
+  template_id?: string
 }
 
 export interface RunResponse {
@@ -194,6 +226,15 @@ export interface ReasoningMessage {
   }
   created_at?: number
 }
+// Template suggestion data stored in chat message extra_data
+export interface TemplateSuggestionsData {
+  suggestions: TemplateSuggestion[]
+  run_id?: string
+  session_id?: string | null
+  message?: string
+  dataset_summary?: DatasetSummary
+}
+
 export interface ChatMessage {
   role: 'user' | 'agent' | 'system' | 'tool'
   content: string
@@ -204,6 +245,11 @@ export interface ChatMessage {
     reasoning_steps?: ReasoningSteps[]
     reasoning_messages?: ReasoningMessage[]
     references?: ReferenceData[]
+    // Animation pipeline template selection
+    template_suggestions?: TemplateSuggestionsData
+    run_paused?: boolean
+    awaiting?: string
+    selected_template?: string
   }
   images?: ImageData[]
   videos?: VideoData[]

@@ -4,7 +4,13 @@ import { APIRoutes } from '@/api/routes'
 
 import useChatActions from '@/hooks/useChatActions'
 import { useStore } from '../store'
-import { RunEvent, RunResponseContent, type RunResponse } from '@/types/os'
+import {
+  RunEvent,
+  RunResponseContent,
+  type RunResponse,
+  TemplateSuggestion,
+  DatasetSummary
+} from '@/types/os'
 import { constructEndpointUrl } from '@/lib/constructEndpointUrl'
 import useAIResponseStream from './useAIResponseStream'
 import { ToolCall } from '@/types/os'
@@ -429,6 +435,71 @@ const useAIChatStreamHandler = () => {
                 }
                 return newMessages
               })
+            } else if (chunk.event === RunEvent.TemplateSuggestions) {
+              // Handle template suggestions event from animation pipeline
+              // Store the suggestions in the last message for rendering
+              setMessages((prevMessages) => {
+                const newMessages = [...prevMessages]
+                const lastMessage = newMessages[newMessages.length - 1]
+                if (lastMessage && lastMessage.role === 'agent') {
+                  // Store template suggestions data in extra_data
+                  lastMessage.extra_data = {
+                    ...lastMessage.extra_data,
+                    template_suggestions: {
+                      suggestions: (chunk as any)
+                        .suggestions as TemplateSuggestion[],
+                      run_id: chunk.run_id,
+                      session_id: chunk.session_id,
+                      message:
+                        typeof chunk.content === 'string'
+                          ? chunk.content
+                          : 'Please select a template:',
+                      dataset_summary: (chunk as any).dataset_summary as
+                        | DatasetSummary
+                        | undefined
+                    }
+                  }
+                  // Update the content to show the message
+                  if (typeof chunk.content === 'string') {
+                    lastMessage.content = chunk.content
+                  }
+                }
+                return newMessages
+              })
+            } else if (chunk.event === RunEvent.RunPaused) {
+              // Handle run paused event (e.g., awaiting template selection)
+              setMessages((prevMessages) => {
+                const newMessages = [...prevMessages]
+                const lastMessage = newMessages[newMessages.length - 1]
+                if (lastMessage && lastMessage.role === 'agent') {
+                  // Mark the message as paused/awaiting user action
+                  lastMessage.extra_data = {
+                    ...lastMessage.extra_data,
+                    run_paused: true,
+                    awaiting: (chunk as any).awaiting || 'user_action'
+                  }
+                }
+                return newMessages
+              })
+            } else if (chunk.event === RunEvent.TemplateSelected) {
+              // Handle template selected confirmation
+              setMessages((prevMessages) => {
+                const newMessages = [...prevMessages]
+                const lastMessage = newMessages[newMessages.length - 1]
+                if (lastMessage && lastMessage.role === 'agent') {
+                  // Clear the template suggestions and update content
+                  lastMessage.extra_data = {
+                    ...lastMessage.extra_data,
+                    template_suggestions: undefined,
+                    run_paused: false,
+                    selected_template: (chunk as any).template_id
+                  }
+                  if (typeof chunk.content === 'string') {
+                    lastMessage.content += '\n\n' + chunk.content
+                  }
+                }
+                return newMessages
+              })
             } else if (
               chunk.event === RunEvent.RunError ||
               chunk.event === RunEvent.TeamRunError ||
@@ -495,7 +566,13 @@ const useAIChatStreamHandler = () => {
                           message.extra_data?.reasoning_steps,
                         references:
                           chunk.extra_data?.references ??
-                          message.extra_data?.references
+                          message.extra_data?.references,
+                        // Preserve animation pipeline template selection data
+                        template_suggestions:
+                          message.extra_data?.template_suggestions,
+                        run_paused: message.extra_data?.run_paused,
+                        awaiting: message.extra_data?.awaiting,
+                        selected_template: message.extra_data?.selected_template
                       }
                     }
                   }

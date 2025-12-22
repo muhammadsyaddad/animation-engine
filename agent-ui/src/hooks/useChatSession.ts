@@ -67,6 +67,28 @@ interface PersistedExtra {
   videos?: VideoData[]
   audio?: AudioData[]
   response_audio?: ResponseAudio
+  template_suggestions?: {
+    suggestions: Array<{
+      template_id: string
+      template_name: string
+      description: string
+      confidence: number
+      reasons: string[]
+      preview_url?: string
+    }>
+    run_id?: string
+    session_id?: string
+    message?: string
+    dataset_summary?: {
+      row_count?: number
+      column_count?: number
+      column_names?: string[]
+      sample_values?: Record<string, string[]>
+    }
+  }
+  run_paused?: boolean
+  awaiting?: string
+  selected_template?: string
 }
 
 function toUIMessage(api: APIChatMessage): UIChatMessage {
@@ -82,13 +104,20 @@ function toUIMessage(api: APIChatMessage): UIChatMessage {
   const hasExtraData =
     (extra.reasoning_steps && extra.reasoning_steps.length > 0) ||
     (extra.reasoning_messages && extra.reasoning_messages.length > 0) ||
-    (extra.references && extra.references.length > 0)
+    (extra.references && extra.references.length > 0) ||
+    extra.template_suggestions ||
+    extra.run_paused ||
+    extra.selected_template
 
   const extraData: UIChatMessage['extra_data'] | undefined = hasExtraData
     ? {
         reasoning_steps: extra.reasoning_steps,
         reasoning_messages: extra.reasoning_messages,
-        references: extra.references
+        references: extra.references,
+        template_suggestions: extra.template_suggestions,
+        run_paused: extra.run_paused,
+        awaiting: extra.awaiting,
+        selected_template: extra.selected_template
       }
     : undefined
 
@@ -113,10 +142,19 @@ function toExtraJsonFromUI(
   msg: Partial<UIChatMessage>
 ): Record<string, unknown> | undefined {
   const extra: Record<string, unknown> = {}
-  if (msg.tool_calls && msg.tool_calls.length > 0) extra.tool_calls = msg.tool_calls
-  if (msg.extra_data?.reasoning_steps) extra.reasoning_steps = msg.extra_data.reasoning_steps
-  if (msg.extra_data?.reasoning_messages) extra.reasoning_messages = msg.extra_data.reasoning_messages
+  if (msg.tool_calls && msg.tool_calls.length > 0)
+    extra.tool_calls = msg.tool_calls
+  if (msg.extra_data?.reasoning_steps)
+    extra.reasoning_steps = msg.extra_data.reasoning_steps
+  if (msg.extra_data?.reasoning_messages)
+    extra.reasoning_messages = msg.extra_data.reasoning_messages
   if (msg.extra_data?.references) extra.references = msg.extra_data.references
+  if (msg.extra_data?.template_suggestions)
+    extra.template_suggestions = msg.extra_data.template_suggestions
+  if (msg.extra_data?.run_paused) extra.run_paused = msg.extra_data.run_paused
+  if (msg.extra_data?.awaiting) extra.awaiting = msg.extra_data.awaiting
+  if (msg.extra_data?.selected_template)
+    extra.selected_template = msg.extra_data.selected_template
   if (msg.images) extra.images = msg.images
   if (msg.videos) extra.videos = msg.videos
   if (msg.audio) extra.audio = msg.audio
@@ -212,7 +250,9 @@ export function useChatSession(): UseChatSession {
           session_id: session.id,
           session_name: session.name ?? '-',
           created_at: createdAt,
-          updated_at: parseTimestampToSeconds(session.updated_at ?? session.created_at)
+          updated_at: parseTimestampToSeconds(
+            session.updated_at ?? session.created_at
+          )
         }
         upsertSessionEntry(entry)
         setCurrentSessionId(session.id)
@@ -220,7 +260,9 @@ export function useChatSession(): UseChatSession {
         setSessionQuery(session.id)
         return session.id
       } catch (e) {
-        toast.error(`Failed to create session: ${e instanceof Error ? e.message : String(e)}`)
+        toast.error(
+          `Failed to create session: ${e instanceof Error ? e.message : String(e)}`
+        )
         return null
       }
     },
@@ -253,9 +295,16 @@ export function useChatSession(): UseChatSession {
         setCurrentSessionId(s.id)
         setCurrentSessionName(s.name ?? '-')
         setSessionQuery(s.id)
-        await loadMessagesInternal(endpoint, s.id, setIsMessagesLoading, setMessages)
+        await loadMessagesInternal(
+          endpoint,
+          s.id,
+          setIsMessagesLoading,
+          setMessages
+        )
       } catch (e) {
-        toast.error(`Failed to open session: ${e instanceof Error ? e.message : String(e)}`)
+        toast.error(
+          `Failed to open session: ${e instanceof Error ? e.message : String(e)}`
+        )
       }
     },
     [
@@ -279,11 +328,18 @@ export function useChatSession(): UseChatSession {
         renameSessionEntry(s.id, s.name ?? '-')
         return true
       } catch (e) {
-        toast.error(`Failed to rename session: ${e instanceof Error ? e.message : String(e)}`)
+        toast.error(
+          `Failed to rename session: ${e instanceof Error ? e.message : String(e)}`
+        )
         return false
       }
     },
-    [requireEndpoint, currentSessionId, setCurrentSessionName, renameSessionEntry]
+    [
+      requireEndpoint,
+      currentSessionId,
+      setCurrentSessionName,
+      renameSessionEntry
+    ]
   )
 
   const deleteCurrentSession = useCallback(async (): Promise<boolean> => {
@@ -297,7 +353,9 @@ export function useChatSession(): UseChatSession {
       setSessionQuery(null)
       return true
     } catch (e) {
-      toast.error(`Failed to delete session: ${e instanceof Error ? e.message : String(e)}`)
+      toast.error(
+        `Failed to delete session: ${e instanceof Error ? e.message : String(e)}`
+      )
       return false
     }
   }, [
@@ -331,7 +389,9 @@ export function useChatSession(): UseChatSession {
         }))
         setSessionsData(entries)
       } catch (e) {
-        toast.error(`Failed to load sessions: ${e instanceof Error ? e.message : String(e)}`)
+        toast.error(
+          `Failed to load sessions: ${e instanceof Error ? e.message : String(e)}`
+        )
         setSessionsData([])
       }
     },
@@ -345,7 +405,12 @@ export function useChatSession(): UseChatSession {
 
       const sid = sessionIdArg ?? currentSessionId
       if (!sid) return null
-      return loadMessagesInternal(endpoint, sid, setIsMessagesLoading, setMessages)
+      return loadMessagesInternal(
+        endpoint,
+        sid,
+        setIsMessagesLoading,
+        setMessages
+      )
     },
     [requireEndpoint, currentSessionId, setIsMessagesLoading, setMessages]
   )
@@ -368,7 +433,9 @@ export function useChatSession(): UseChatSession {
         setMessages((prev) => [...prev, uiMsg])
         return true
       } catch (e) {
-        toast.error(`Failed to save your message: ${e instanceof Error ? e.message : String(e)}`)
+        toast.error(
+          `Failed to save your message: ${e instanceof Error ? e.message : String(e)}`
+        )
         return false
       }
     },
@@ -395,7 +462,9 @@ export function useChatSession(): UseChatSession {
         setMessages((prev) => [...prev, uiMsg])
         return true
       } catch (e) {
-        toast.error(`Failed to save agent message: ${e instanceof Error ? e.message : String(e)}`)
+        toast.error(
+          `Failed to save agent message: ${e instanceof Error ? e.message : String(e)}`
+        )
         return false
       }
     },
@@ -415,7 +484,12 @@ export function useChatSession(): UseChatSession {
         })
       }
     },
-    [setCurrentSessionId, setCurrentSessionName, setSessionQuery, upsertSessionEntry]
+    [
+      setCurrentSessionId,
+      setCurrentSessionName,
+      setSessionQuery,
+      upsertSessionEntry
+    ]
   )
 
   const clearLocalSession = useCallback(() => {
@@ -460,7 +534,9 @@ async function loadMessagesInternal(
     setMessages(ui)
     return ui
   } catch (e) {
-    toast.error(`Failed to load messages: ${e instanceof Error ? e.message : String(e)}`)
+    toast.error(
+      `Failed to load messages: ${e instanceof Error ? e.message : String(e)}`
+    )
     setMessages([])
     return null
   } finally {

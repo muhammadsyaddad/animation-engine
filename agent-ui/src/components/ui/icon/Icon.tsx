@@ -14,6 +14,11 @@ const Icon: FC<IconProps> = ({
 }) => {
   const IconElement = ICONS[type]
 
+  if (!IconElement) {
+    console.warn(`Icon type "${type}" not found in ICONS`)
+    return null
+  }
+
   return (
     <IconElement
       className={cn(

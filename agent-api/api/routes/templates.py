@@ -14,16 +14,25 @@ Each template defines:
   - preview_url: optional preview image/gif
   - preview_fallback_url: SVG placeholder fallback
   - axes: list of required/optional column mappings
+
+Column Mapping Validation:
+  - validate_column_mappings_with_schema() validates user-provided column mappings
+    against both template requirements AND actual dataset schema
+  - Ensures numeric axes get numeric columns, categorical axes get categorical columns, etc.
 """
 
 from __future__ import annotations
 
 import os
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Dict, Any, Tuple
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -389,8 +398,106 @@ def get_template(template_id: str) -> TemplateSchema:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Template '{template_id}' not found. Available templates: {available}"
         )
-    # Build with current preview URL status
+
     return _build_template_with_preview(defn)
+
+
+class ColumnSuggestionsRequest(BaseModel):
+    """Request for smart column suggestions."""
+    template_id: str = Field(..., description="Template ID to get suggestions for")
+    numeric_columns: List[str] = Field(default_factory=list, description="List of numeric column names")
+    categorical_columns: List[str] = Field(default_factory=list, description="List of categorical column names")
+    time_column: Optional[str] = Field(None, description="Detected time column (if any)")
+
+
+class ColumnSuggestionsResponse(BaseModel):
+    """Response with smart column suggestions."""
+    template_id: str
+    suggestions: Dict[str, str] = Field(..., description="Mapping of axis name to suggested column")
+    template_axes: List[AxisRequirement] = Field(..., description="Template axis requirements for reference")
+
+
+@router.post("/suggestions", response_model=ColumnSuggestionsResponse)
+def get_column_suggestions(body: ColumnSuggestionsRequest) -> ColumnSuggestionsResponse:
+    """
+    Get smart column suggestions for a template based on dataset schema.
+
+    This endpoint analyzes the provided column metadata and suggests
+    appropriate columns for each axis of the selected template.
+
+    Use this to pre-populate the column mapping modal in the UI.
+    """
+    template = TEMPLATES_BY_ID.get(body.template_id)
+    if not template:
+        available = list(TEMPLATES_BY_ID.keys())
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Template '{body.template_id}' not found. Available templates: {available}"
+        )
+
+    suggestions = get_smart_column_suggestions(
+        template_id=body.template_id,
+        numeric_columns=body.numeric_columns,
+        categorical_columns=body.categorical_columns,
+        time_column=body.time_column,
+    )
+
+    return ColumnSuggestionsResponse(
+        template_id=body.template_id,
+        suggestions=suggestions,
+        template_axes=template.axes,
+    )
+
+
+class ValidateMappingsRequest(BaseModel):
+    """Request for validating column mappings."""
+    template_id: str = Field(..., description="Template ID to validate against")
+    mappings: Dict[str, Optional[str]] = Field(..., description="Column mappings to validate")
+    numeric_columns: List[str] = Field(default_factory=list, description="List of numeric column names")
+    categorical_columns: List[str] = Field(default_factory=list, description="List of categorical column names")
+    time_column: Optional[str] = Field(None, description="Detected time column (if any)")
+    all_columns: List[str] = Field(default_factory=list, description="List of all column names")
+    is_wide_format: bool = Field(False, description="Whether dataset is in wide format (dates/years as column headers)")
+
+
+class ValidateMappingsResponse(BaseModel):
+    """Response for column mapping validation."""
+    is_valid: bool
+    errors: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    suggestions: Dict[str, str] = Field(default_factory=dict, description="Suggested corrections")
+
+
+@router.post("/validate-mappings", response_model=ValidateMappingsResponse)
+def validate_mappings_endpoint(body: ValidateMappingsRequest) -> ValidateMappingsResponse:
+    """
+    Validate column mappings against template requirements and dataset schema.
+
+    This endpoint checks:
+    1. All required axes have column mappings
+    2. Mapped columns exist in the dataset
+    3. Column data types match axis requirements (numeric, categorical, time)
+    4. Common mistakes (e.g., same column for X and Y in bubble chart)
+
+    Use this for client-side validation before submitting template selection.
+    """
+    result = validate_column_mappings_with_schema(
+        template_id=body.template_id,
+        mappings=body.mappings,
+        csv_path="(validation request)",  # Not needed for validation-only
+        numeric_columns=body.numeric_columns,
+        categorical_columns=body.categorical_columns,
+        time_column=body.time_column,
+        all_columns=body.all_columns if body.all_columns else None,
+        is_wide_format=body.is_wide_format,
+    )
+
+    return ValidateMappingsResponse(
+        is_valid=result.is_valid,
+        errors=result.errors,
+        warnings=result.warnings,
+        suggestions=result.suggestions,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -436,3 +543,384 @@ def validate_column_mappings(template_id: str, mappings: dict[str, Optional[str]
                 missing.append(axis.name)
 
     return missing
+
+
+# =============================================================================
+# COLUMN MAPPING VALIDATION WITH SCHEMA
+# =============================================================================
+
+@dataclass
+class ColumnMappingValidationResult:
+    """Result of validating column mappings against template and schema."""
+
+    is_valid: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    suggestions: Dict[str, str] = field(default_factory=dict)  # axis_name -> suggested_column
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "is_valid": self.is_valid,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "suggestions": self.suggestions,
+        }
+
+
+def _normalize_column_mapping_keys(mappings: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
+    """
+    Normalize column mapping keys to match template axis names.
+
+    The frontend may send keys like 'x_col' but templates use 'x_column'.
+    This function handles both formats.
+    """
+    # Mapping from short form (frontend) to long form (template)
+    key_aliases = {
+        "x_col": "x_column",
+        "y_col": "y_column",
+        "r_col": "size_column",
+        "size_col": "size_column",
+        "time_col": "time_column",
+        "entity_col": "entity_column",
+        "group_col": "group_column",
+        "value_col": "value_column",
+        "category_col": "category_column",
+        "label_col": "label_column",
+        "change_col": "change_column",
+    }
+
+    normalized = {}
+    for key, value in mappings.items():
+        # Convert to the template's axis name format
+        normalized_key = key_aliases.get(key, key)
+        normalized[normalized_key] = value
+
+        # Also keep original key for backward compatibility
+        if key not in normalized:
+            normalized[key] = value
+
+    return normalized
+
+
+def _get_schema_column_type(
+    column_name: str,
+    numeric_columns: List[str],
+    categorical_columns: List[str],
+    time_column: Optional[str],
+) -> str:
+    """Determine the type of a column based on schema analysis."""
+    if column_name == time_column:
+        return "time"
+    if column_name in numeric_columns:
+        return "numeric"
+    if column_name in categorical_columns:
+        return "categorical"
+    return "unknown"
+
+
+def _is_type_compatible(required_type: str, actual_type: str) -> bool:
+    """
+    Check if an actual column type is compatible with a required type.
+
+    Type compatibility rules:
+    - "any" accepts everything
+    - "numeric" requires numeric
+    - "categorical" requires categorical
+    - "time" requires time (but numeric years can work too)
+    """
+    if required_type == "any":
+        return True
+
+    if required_type == actual_type:
+        return True
+
+    # Time columns are often numeric (years) so allow numeric for time
+    if required_type == "time" and actual_type == "numeric":
+        return True
+
+    return False
+
+
+def _suggest_column_for_axis(
+    axis: AxisRequirement,
+    numeric_columns: List[str],
+    categorical_columns: List[str],
+    time_column: Optional[str],
+    already_used: set,
+) -> Optional[str]:
+    """
+    Suggest a column for an axis based on its required data type.
+
+    Returns the first suitable unused column, or None if no match found.
+
+    Note: For time columns, we only suggest the detected time_column. We do NOT
+    fall back to suggesting arbitrary numeric columns, as this leads to confusing
+    suggestions (e.g., suggesting a ranking column named 'Apr 11 2018' as a time column
+    when the data is in wide format with dates as column headers).
+    """
+    required_type = axis.data_type
+
+    if required_type == "time":
+        # Only suggest the properly detected time column
+        # Do NOT fall back to numeric columns - this causes confusing suggestions
+        # for wide-format datasets where date strings are column headers (numeric values)
+        if time_column and time_column not in already_used:
+            return time_column
+        # No fallback - if there's no detected time column, return None
+        # The validation error will be clearer: "no suitable time column found"
+        return None
+
+    elif required_type == "numeric":
+        for col in numeric_columns:
+            if col not in already_used:
+                return col
+
+    elif required_type == "categorical":
+        for col in categorical_columns:
+            if col not in already_used:
+                return col
+
+    elif required_type == "any":
+        # Prefer categorical for "any" type
+        for col in categorical_columns:
+            if col not in already_used:
+                return col
+        for col in numeric_columns:
+            if col not in already_used:
+                return col
+
+    return None
+
+
+def validate_column_mappings_with_schema(
+    template_id: str,
+    mappings: Dict[str, Optional[str]],
+    csv_path: str,
+    numeric_columns: Optional[List[str]] = None,
+    categorical_columns: Optional[List[str]] = None,
+    time_column: Optional[str] = None,
+    all_columns: Optional[List[str]] = None,
+    is_wide_format: bool = False,
+) -> ColumnMappingValidationResult:
+    """
+    Validate column mappings against both template requirements AND dataset schema.
+
+    This function performs comprehensive validation:
+    1. Checks that all required axes have column mappings
+    2. Verifies that mapped columns actually exist in the dataset
+    3. Validates that column data types match axis requirements
+    4. Warns about potential issues (same column used multiple times, etc.)
+    5. Suggests appropriate columns for missing or invalid mappings
+
+    Args:
+        template_id: The template to validate against (e.g., "bubble", "bar_race")
+        mappings: User-provided column mappings (e.g., {"x_col": "Year", "y_col": "Value"})
+        csv_path: Path to the CSV file (for logging/error messages)
+        numeric_columns: List of numeric column names from schema analysis
+        categorical_columns: List of categorical column names from schema analysis
+        time_column: Detected time column from schema analysis
+        all_columns: List of all column names in the dataset
+        is_wide_format: Whether the dataset is in wide format (dates/years as column headers)
+
+    Returns:
+        ColumnMappingValidationResult with validation status, errors, warnings, and suggestions
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+    suggestions: Dict[str, str] = {}
+
+    # Normalize input lists
+    numeric_columns = numeric_columns or []
+    categorical_columns = categorical_columns or []
+    all_columns = all_columns or (numeric_columns + categorical_columns + ([time_column] if time_column else []))
+
+    # Get template definition
+    template = TEMPLATES_BY_ID.get(template_id)
+    if not template:
+        return ColumnMappingValidationResult(
+            is_valid=False,
+            errors=[f"Unknown template: '{template_id}'. Available templates: {list(TEMPLATES_BY_ID.keys())}"],
+        )
+
+    # Normalize mapping keys
+    normalized_mappings = _normalize_column_mapping_keys(mappings)
+
+    logger.info(f"[VALIDATION] Validating column mappings for template '{template_id}'")
+    logger.debug(f"[VALIDATION] Mappings: {normalized_mappings}")
+    logger.debug(f"[VALIDATION] Schema - numeric: {numeric_columns}, categorical: {categorical_columns}, time: {time_column}")
+
+    used_columns = set()
+
+    for axis in template.axes:
+        axis_name = axis.name
+        required_type = axis.data_type
+        is_required = axis.required
+
+        # Get the mapped column (check both normalized and original keys)
+        mapped_column = normalized_mappings.get(axis_name)
+
+        # Also check short-form keys that might not have been normalized
+        if not mapped_column:
+            short_key = axis_name.replace("_column", "_col")
+            mapped_column = normalized_mappings.get(short_key)
+
+        logger.debug(f"[VALIDATION] Axis '{axis_name}' (required={is_required}, type={required_type}): mapped to '{mapped_column}'")
+
+        # Check if required axis is missing
+        if not mapped_column:
+            if is_required:
+                # Generate suggestion for missing required axis
+                suggestion = _suggest_column_for_axis(
+                    axis, numeric_columns, categorical_columns, time_column, used_columns
+                )
+                if suggestion:
+                    suggestions[axis_name] = suggestion
+                    errors.append(
+                        f"Missing required mapping for '{axis.label}' ({axis_name}). "
+                        f"Expected a {required_type} column. Suggested: '{suggestion}'"
+                    )
+                else:
+                    # Provide more helpful error message based on the type
+                    if required_type == "time":
+                        # Special message for time columns - often indicates wide-format data
+                        if is_wide_format:
+                            # We know the data is wide format - give specific guidance
+                            errors.append(
+                                f"Missing required mapping for '{axis.label}' ({axis_name}). "
+                                f"Your dataset is in 'wide format' (dates/periods as column headers like 'Apr 10 2018'). "
+                                f"This template requires a time column as row values, not column headers. "
+                                f"Options: 1) Use a template that works with wide data (bar_race, line_evolution), "
+                                f"2) Transform your data to 'long format' with a dedicated time column."
+                            )
+                        else:
+                            errors.append(
+                                f"Missing required mapping for '{axis.label}' ({axis_name}). "
+                                f"This template requires a time column for animation, but no time column was detected. "
+                                f"Your dataset may need a column with dates/years/timestamps as row values. "
+                                f"Consider choosing a different template that doesn't require time-based animation."
+                            )
+                    else:
+                        errors.append(
+                            f"Missing required mapping for '{axis.label}' ({axis_name}). "
+                            f"Expected a {required_type} column, but no suitable column found in dataset."
+                        )
+            continue
+
+        # Check if column exists in dataset
+        if all_columns and mapped_column not in all_columns:
+            errors.append(
+                f"Column '{mapped_column}' for axis '{axis.label}' does not exist in dataset. "
+                f"Available columns: {all_columns[:10]}{'...' if len(all_columns) > 10 else ''}"
+            )
+            # Suggest an alternative
+            suggestion = _suggest_column_for_axis(
+                axis, numeric_columns, categorical_columns, time_column, used_columns
+            )
+            if suggestion:
+                suggestions[axis_name] = suggestion
+            continue
+
+        # Check data type compatibility
+        actual_type = _get_schema_column_type(
+            mapped_column, numeric_columns, categorical_columns, time_column
+        )
+
+        if not _is_type_compatible(required_type, actual_type):
+            errors.append(
+                f"Column '{mapped_column}' has type '{actual_type}' but axis '{axis.label}' "
+                f"requires type '{required_type}'. "
+                f"{'Numeric columns: ' + str(numeric_columns[:5]) if required_type == 'numeric' else ''}"
+                f"{'Categorical columns: ' + str(categorical_columns[:5]) if required_type == 'categorical' else ''}"
+            )
+            # Suggest a compatible column
+            suggestion = _suggest_column_for_axis(
+                axis, numeric_columns, categorical_columns, time_column, used_columns
+            )
+            if suggestion:
+                suggestions[axis_name] = suggestion
+            continue
+
+        # Check for duplicate column usage (warning, not error)
+        if mapped_column in used_columns:
+            # Same column used for multiple axes - this might be intentional for some cases
+            # but is often a mistake
+            warnings.append(
+                f"Column '{mapped_column}' is used for multiple axes. "
+                f"This may be intentional, but could also indicate a mapping error."
+            )
+
+        used_columns.add(mapped_column)
+
+    # Additional validation: check for obviously wrong patterns
+    x_col = normalized_mappings.get("x_column") or normalized_mappings.get("x_col")
+    y_col = normalized_mappings.get("y_column") or normalized_mappings.get("y_col")
+
+    if template_id == "bubble" and x_col and y_col:
+        # For bubble charts, x and y being the same categorical column is almost certainly wrong
+        if x_col == y_col:
+            x_type = _get_schema_column_type(x_col, numeric_columns, categorical_columns, time_column)
+            if x_type == "categorical":
+                errors.append(
+                    f"Bubble chart has the same categorical column '{x_col}' for both X and Y axes. "
+                    f"X and Y should typically be different numeric columns representing different dimensions."
+                )
+
+    is_valid = len(errors) == 0
+
+    # Log validation result
+    if is_valid:
+        logger.info(f"[VALIDATION] Column mappings valid for template '{template_id}'")
+        if warnings:
+            logger.warning(f"[VALIDATION] Warnings: {warnings}")
+    else:
+        logger.warning(f"[VALIDATION] Column mappings INVALID for template '{template_id}'")
+        logger.warning(f"[VALIDATION] Errors: {errors}")
+        if suggestions:
+            logger.info(f"[VALIDATION] Suggestions: {suggestions}")
+
+    return ColumnMappingValidationResult(
+        is_valid=is_valid,
+        errors=errors,
+        warnings=warnings,
+        suggestions=suggestions,
+    )
+
+
+def get_smart_column_suggestions(
+    template_id: str,
+    numeric_columns: List[str],
+    categorical_columns: List[str],
+    time_column: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Generate smart column suggestions for a template based on dataset schema.
+
+    This provides sensible defaults that the frontend can use to pre-populate
+    the column mapping modal.
+
+    Args:
+        template_id: The template to generate suggestions for
+        numeric_columns: List of numeric column names
+        categorical_columns: List of categorical column names
+        time_column: Detected time column (if any)
+
+    Returns:
+        Dict mapping axis names to suggested column names
+    """
+    template = TEMPLATES_BY_ID.get(template_id)
+    if not template:
+        return {}
+
+    suggestions: Dict[str, str] = {}
+    used_columns: set = set()
+
+    for axis in template.axes:
+        suggestion = _suggest_column_for_axis(
+            axis, numeric_columns, categorical_columns, time_column, used_columns
+        )
+        if suggestion:
+            suggestions[axis.name] = suggestion
+            used_columns.add(suggestion)
+
+    logger.debug(f"[SUGGESTIONS] Generated suggestions for '{template_id}': {suggestions}")
+    return suggestions

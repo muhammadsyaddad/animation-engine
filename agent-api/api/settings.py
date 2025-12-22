@@ -26,6 +26,13 @@ class ApiSettings(BaseSettings):
     default_aspect_ratio: str = "16:9"  # Options: "16:9" | "9:16" | "1:1"
     default_render_quality: str = "medium"  # Options: "low"(-ql) | "medium"(-qm) | "high"(-qh)
 
+    # Template selection behavior
+    # When False, the system will prompt users to select a template instead of auto-selecting
+    # When True (legacy), the system auto-selects the best template based on inference
+    auto_select_templates: bool = False
+    # Minimum confidence score (0.0-1.0) required to auto-select a template (only applies when auto_select_templates=True)
+    auto_select_confidence_threshold: float = 0.8
+
     # Storage mode: when True, serve from local artifacts (/static); when False, upload to Azure Blob
     use_local_storage: bool = True
     azure_storage_connection_string: Optional[str] = None

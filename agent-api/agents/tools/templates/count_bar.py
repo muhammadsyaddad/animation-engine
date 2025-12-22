@@ -30,9 +30,13 @@ Usage:
 from __future__ import annotations
 
 import csv
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.templates.count_bar")
 
 # Import primitives
 from agents.tools.primitives.elements import (
@@ -158,48 +162,56 @@ def parse_csv_data(
     Returns:
         CountBarData with processed animation data
     """
+    logger.info(f"[COUNT_BAR] parse_csv_data started | csv_path={csv_path} | count_column={count_column} | top_n={top_n}")
+
     if not os.path.exists(csv_path):
+        logger.error(f"[COUNT_BAR] Dataset not found: {csv_path}")
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
+    logger.info(f"[COUNT_BAR] CSV headers detected: {headers}")
 
-        if not headers:
-            raise ValueError("CSV file has no headers")
+    if not headers:
+        logger.error(f"[COUNT_BAR] CSV file has no headers")
+        raise ValueError("CSV file has no headers")
 
-        # Resolve count column
-        resolved_column = None
-        if count_column:
-            resolved_column = _resolve_column(
-                headers, count_column,
-                [count_column.lower(), count_column.upper(), count_column.title()]
-            )
+    # Resolve count column
+    resolved_column = None
+    if count_column:
+        resolved_column = _resolve_column(
+            headers, count_column,
+            [count_column.lower(), count_column.upper(), count_column.title()]
+        )
+        logger.debug(f"[COUNT_BAR] Attempted column resolution | requested={count_column} -> resolved={resolved_column}")
 
-        # If no column specified or resolved, try common patterns
-        if not resolved_column:
-            categorical_candidates = [
-                "category", "name", "country", "region", "area", "type", "group",
-                "label", "item", "product", "status", "class", "sector"
-            ]
-            for candidate in categorical_candidates:
-                resolved_column = _resolve_column(headers, candidate, [candidate])
-                if resolved_column:
-                    break
+    # If no column specified or resolved, try common patterns
+    if not resolved_column:
+        categorical_candidates = [
+            "category", "name", "country", "region", "area", "type", "group",
+            "label", "item", "product", "status", "class", "sector"
+        ]
+        for candidate in categorical_candidates:
+            resolved_column = _resolve_column(headers, candidate, [candidate])
+            if resolved_column:
+                logger.info(f"[COUNT_BAR] Auto-detected categorical column: {resolved_column}")
+                break
 
-        # Fallback to first column
-        if not resolved_column:
-            resolved_column = headers[0]
+    # Fallback to first column
+    if not resolved_column:
+        resolved_column = headers[0]
+        logger.info(f"[COUNT_BAR] Fallback to first column: {resolved_column}")
 
-        # Count occurrences
-        counts: Dict[str, int] = {}
-        total_items = 0
+    logger.info(f"[COUNT_BAR] Using column for counting: {resolved_column}")
 
-        for row in reader:
-            value = (row.get(resolved_column) or "").strip()
-            if value:
-                counts[value] = counts.get(value, 0) + 1
-                total_items += 1
+    # Count occurrences
+    counts: Dict[str, int] = {}
+    total_items = 0
+
+    for row in rows:
+        value = (row.get(resolved_column) or "").strip()
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+            total_items += 1
 
     if not counts:
         raise ValueError(f"No valid data found in column '{resolved_column}'")

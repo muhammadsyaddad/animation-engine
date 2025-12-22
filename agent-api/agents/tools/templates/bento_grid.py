@@ -206,93 +206,91 @@ def parse_csv_data(
 
     items: List[KPIItem] = []
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
 
-        # Resolve column names
-        label_col = _resolve_column(
-            headers, label_col,
-            ["label", "name", "metric", "kpi", "title", "category", "item", "indicator"]
-        )
-        value_col = _resolve_column(
-            headers, value_col,
-            ["value", "amount", "total", "count", "number", "score", "result"]
-        )
+    # Resolve column names
+    label_col = _resolve_column(
+        headers, label_col,
+        ["label", "name", "metric", "kpi", "title", "category", "item", "indicator"]
+    )
+    value_col = _resolve_column(
+        headers, value_col,
+        ["value", "amount", "total", "count", "number", "score", "result"]
+    )
 
-        # Optional columns
-        change_col_resolved = None
-        if change_col:
-            change_col_resolved = _resolve_column(
-                headers, change_col,
-                ["change", "delta", "growth", "diff", "percent_change", "yoy", "mom"]
-            )
-        else:
-            # Try to auto-detect change column
-            for candidate in ["change", "delta", "growth", "percent_change", "yoy"]:
-                if candidate in headers or candidate.lower() in [h.lower() for h in headers]:
-                    change_col_resolved = _resolve_column(headers, candidate, [candidate])
+    # Optional columns
+    change_col_resolved = None
+    if change_col:
+        change_col_resolved = _resolve_column(
+            headers, change_col,
+            ["change", "delta", "growth", "diff", "percent_change", "yoy", "mom"]
+        )
+    else:
+        # Try to auto-detect change column
+        for candidate in ["change", "delta", "growth", "percent_change", "yoy"]:
+            if candidate in headers or candidate.lower() in [h.lower() for h in headers]:
+                change_col_resolved = _resolve_column(headers, candidate, [candidate])
+                break
+
+    prefix_col_resolved = None
+    if prefix_col:
+        prefix_col_resolved = _resolve_column(headers, prefix_col, ["prefix", "symbol", "currency"])
+
+    suffix_col_resolved = None
+    if suffix_col:
+        suffix_col_resolved = _resolve_column(headers, suffix_col, ["suffix", "unit", "units"])
+
+    for row in rows:
+        label = (row.get(label_col) or "").strip()
+        value_str = (row.get(value_col) or "").strip()
+
+        if not label or not value_str:
+            continue
+
+        # Parse value (handle currency symbols, commas, etc.)
+        try:
+            clean_val = value_str.replace(",", "").replace("$", "").replace("%", "").replace("€", "").replace("£", "")
+            value = float(clean_val)
+        except ValueError:
+            continue
+
+        # Parse optional change
+        change = None
+        if change_col_resolved and row.get(change_col_resolved):
+            try:
+                change_str = row.get(change_col_resolved, "").strip()
+                change_str = change_str.replace("%", "").replace("+", "")
+                change = float(change_str)
+            except ValueError:
+                pass
+
+        # Get prefix/suffix
+        prefix = ""
+        if prefix_col_resolved and row.get(prefix_col_resolved):
+            prefix = row.get(prefix_col_resolved, "").strip()
+        elif "$" in value_str or "€" in value_str or "£" in value_str:
+            # Auto-detect currency prefix from value
+            for sym in ["$", "€", "£"]:
+                if sym in value_str:
+                    prefix = sym
                     break
 
-        prefix_col_resolved = None
-        if prefix_col:
-            prefix_col_resolved = _resolve_column(headers, prefix_col, ["prefix", "symbol", "currency"])
+        suffix = ""
+        if suffix_col_resolved and row.get(suffix_col_resolved):
+            suffix = row.get(suffix_col_resolved, "").strip()
+        elif "%" in value_str:
+            suffix = "%"
 
-        suffix_col_resolved = None
-        if suffix_col:
-            suffix_col_resolved = _resolve_column(headers, suffix_col, ["suffix", "unit", "units"])
+        items.append(KPIItem(
+            label=label,
+            value=value,
+            change=change,
+            prefix=prefix,
+            suffix=suffix,
+        ))
 
-        for row in reader:
-            label = (row.get(label_col) or "").strip()
-            value_str = (row.get(value_col) or "").strip()
-
-            if not label or not value_str:
-                continue
-
-            # Parse value (handle currency symbols, commas, etc.)
-            try:
-                clean_val = value_str.replace(",", "").replace("$", "").replace("%", "").replace("€", "").replace("£", "")
-                value = float(clean_val)
-            except ValueError:
-                continue
-
-            # Parse optional change
-            change = None
-            if change_col_resolved and row.get(change_col_resolved):
-                try:
-                    change_str = row.get(change_col_resolved, "").strip()
-                    change_str = change_str.replace("%", "").replace("+", "")
-                    change = float(change_str)
-                except ValueError:
-                    pass
-
-            # Get prefix/suffix
-            prefix = ""
-            if prefix_col_resolved and row.get(prefix_col_resolved):
-                prefix = row.get(prefix_col_resolved, "").strip()
-            elif "$" in value_str or "€" in value_str or "£" in value_str:
-                # Auto-detect currency prefix from value
-                for sym in ["$", "€", "£"]:
-                    if sym in value_str:
-                        prefix = sym
-                        break
-
-            suffix = ""
-            if suffix_col_resolved and row.get(suffix_col_resolved):
-                suffix = row.get(suffix_col_resolved, "").strip()
-            elif "%" in value_str:
-                suffix = "%"
-
-            items.append(KPIItem(
-                label=label,
-                value=value,
-                change=change,
-                prefix=prefix,
-                suffix=suffix,
-            ))
-
-            if len(items) >= max_items:
-                break
+        if len(items) >= max_items:
+            break
 
     if not items:
         raise ValueError("No valid KPI data found in CSV")

@@ -24,6 +24,14 @@ export const APIRoutes = {
   GenerateAnimation: (agentOSUrl: string) =>
     `${agentOSUrl}/v1/animations/generate`,
 
+  // Run management
+  SelectTemplate: (agentOSUrl: string, runId: string) =>
+    `${agentOSUrl}/v1/agents/runs/${runId}/select_template`,
+  CancelRun: (agentOSUrl: string, runId: string) =>
+    `${agentOSUrl}/v1/agents/runs/${runId}/cancel`,
+  GetRunStatus: (agentOSUrl: string, runId: string) =>
+    `${agentOSUrl}/v1/agents/runs/${runId}`,
+
   // Datasets
   UploadDataset: (agentOSUrl: string) => `${agentOSUrl}/v1/datasets/upload`,
   GetDatasets: (agentOSUrl: string) => `${agentOSUrl}/v1/datasets`,

@@ -1,6 +1,7 @@
 'use client'
-import React, { useState } from 'react'
+import React, { useState, useMemo } from 'react'
 import { TemplateSchema } from '@/types/templates'
+import { useStore } from '@/store'
 
 interface TemplateCardProps {
   template: TemplateSchema
@@ -53,6 +54,32 @@ const TemplateCard: React.FC<TemplateCardProps> = ({
   onSelect
 }) => {
   const [imageState, setImageState] = useState<ImageState>('loading')
+  const selectedEndpoint = useStore((s) => s.selectedEndpoint)
+
+  // Resolve relative URLs to full URLs using the API endpoint
+  const resolveUrl = (url: string | null | undefined): string | null => {
+    if (!url) return null
+    try {
+      if (/^(https?:|data:)/.test(url)) return url
+      if (url.startsWith('/')) {
+        const base = (selectedEndpoint || '').replace(/\/$/, '')
+        return `${base}${url}`
+      }
+      const base = selectedEndpoint || ''
+      return new URL(url, base.endsWith('/') ? base : base + '/').toString()
+    } catch {
+      return url
+    }
+  }
+
+  const resolvedPreviewUrl = useMemo(
+    () => resolveUrl(template.preview_url),
+    [template.preview_url, selectedEndpoint]
+  )
+  const resolvedFallbackUrl = useMemo(
+    () => resolveUrl(template.preview_fallback_url),
+    [template.preview_fallback_url, selectedEndpoint]
+  )
 
   const categoryColor =
     categoryColors[template.category] || categoryColors.general
@@ -130,11 +157,11 @@ const TemplateCard: React.FC<TemplateCardProps> = ({
 
       {/* Preview container */}
       <div className="relative mb-3 h-28 overflow-hidden rounded-lg bg-accent/10">
-        {template.preview_url && imageState !== 'error' && (
+        {resolvedPreviewUrl && imageState !== 'error' && (
           <>
             {/* Hidden image for loading */}
             <img
-              src={template.preview_url}
+              src={resolvedPreviewUrl}
               alt={template.display_name}
               className={`absolute inset-0 h-full w-full rounded-lg object-cover transition-opacity duration-300 ${
                 imageState === 'loaded' ? 'opacity-100' : 'opacity-0'
@@ -150,25 +177,25 @@ const TemplateCard: React.FC<TemplateCardProps> = ({
         )}
 
         {/* Fallback to SVG placeholder when main preview fails or doesn't exist */}
-        {(!template.preview_url || imageState === 'error') &&
-          template.preview_fallback_url && (
+        {(!resolvedPreviewUrl || imageState === 'error') &&
+          resolvedFallbackUrl && (
             <img
-              src={template.preview_fallback_url}
+              src={resolvedFallbackUrl}
               alt={`${template.display_name} preview`}
               className="absolute inset-0 h-full w-full rounded-lg object-cover"
             />
           )}
 
         {/* Generic placeholder when no preview URLs available */}
-        {(!template.preview_url || imageState === 'error') &&
-          !template.preview_fallback_url && (
+        {(!resolvedPreviewUrl || imageState === 'error') &&
+          !resolvedFallbackUrl && (
             <div className="absolute inset-0">{renderPlaceholder()}</div>
           )}
 
         {/* Hover overlay with play indicator for GIFs */}
-        {template.preview_url &&
+        {resolvedPreviewUrl &&
           imageState === 'loaded' &&
-          template.preview_url.endsWith('.gif') && (
+          resolvedPreviewUrl.endsWith('.gif') && (
             <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/0 opacity-0 transition-all duration-200 group-hover:bg-black/30 group-hover:opacity-100">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/90 shadow-lg">
                 <svg

@@ -35,8 +35,13 @@ from __future__ import annotations
 
 import csv
 import os
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+from agents.tools.templates.csv_utils import read_csv_rows,  detect_header_row
+
+# Setup module logger
+logger = logging.getLogger("animation_pipeline.templates.line_evolution")
 
 # Import primitives
 from agents.tools.primitives.elements import (
@@ -148,68 +153,49 @@ def parse_csv_data(
     Returns:
         LineEvolutionData with processed animation data
     """
+    logger.info(f"[LINE_EVOLUTION] parse_csv_data started | csv_path={csv_path} | value_col={value_col} | time_col={time_col}")
+
     if not os.path.exists(csv_path):
+        logger.error(f"[LINE_EVOLUTION] Dataset not found: {csv_path}")
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
+    headers, rows = read_csv_rows(csv_path)
+    logger.info(f"[LINE_EVOLUTION] csv headers detected: {headers}")
 
-        # Resolve column names
-        time_col = _resolve_column(
-            headers, time_col,
-            ["time", "date", "year", "month", "day", "period", "t", "timestamp"]
-        )
-        value_col = _resolve_column(
-            headers, value_col,
-            ["value", "close", "price", "amount", "total", "count", "score", "y"]
-        )
-
-        # Collect data
-        raw_data: List[Tuple[str, float]] = []
-
-        for row in reader:
-            t = (row.get(time_col) or "").strip()
-            v_str = (row.get(value_col) or "").strip()
-
-            if not t or not v_str:
-                continue
-
-            try:
-                v = float(v_str.replace(",", ""))
-                raw_data.append((t, v))
-            except ValueError:
-                continue
-
-    if not raw_data:
-        raise ValueError("No valid data found for Line Chart")
-
-    # Sort by time
-    raw_data.sort(key=lambda x: _parse_time_key(x[0]))
-
-    times = [x[0] for x in raw_data]
-    values = [x[1] for x in raw_data]
-
-    # Calculate ranges
-    min_val = min(values)
-    max_val = max(values)
-    value_range = max_val - min_val
-
-    if value_range == 0:
-        value_range = 1.0
-
-    # Add padding for visual breathing room
-    y_min = min_val - (value_range * 0.1)
-    y_max = max_val + (value_range * 0.15)
-
-    return LineEvolutionData(
-        times=times,
-        values=values,
-        min_value=min_val,
-        max_value=max_val,
-        y_min=y_min,
-        y_max=y_max,
+    resolved_time_col = _resolve_column(
+        headers, time_col,
+        ["time", "date", "year", "month", "day", "period", "t", "timestamp"]
     )
+
+    resolved_value_col = _resolve_column(
+        headers, value_col,
+        ["value", "close", "price", "amount", "total", "count", "score", "y"]
+    )
+
+    logger.info(f"[LINE_EVOLUTION] Column resolution | requested_time={time_col} -> resolved_time={resolved_time_col} | requested_value={value_col} -> resolved_value={resolved_value_col}")
+
+    time_col = resolved_time_col
+    value_col = resolved_value_col
+
+    raw_data: List[Tuple[str, float]] = []
+    skipped_rows = 0
+
+    for row in rows:
+        t = (row.get(time_col) or "").strip()
+        v_str = (row.get(value_col) or "").strip()
+
+        if not t or not v_str:
+            skipped_rows += 1
+            continue
+
+        try:
+            v = float(v_str.replace(",", ""))
+            raw_data.append((t, v))
+        except ValueError:
+            skipped_rows += 1
+            continue
+
+    logger.info(f"[LINE_EVOLUTION] Data collection complete | valid_rows={len(raw_data)} | skipped_rows={skipped_rows}")
 
 
 def detect_insights(data: LineEvolutionData) -> List[LineInsight]:
@@ -313,6 +299,9 @@ def generate_line_evolution(
     include_intro: bool = True,
     include_conclusion: bool = True,
     auto_highlights: bool = True,
+    time_col: Optional[str] = None,
+    value_col: Optional[str] = None,
+    group_col: Optional[str] = None,
 ) -> str:
     """
     Generate modern, story-driven line evolution animation code.
@@ -332,14 +321,24 @@ def generate_line_evolution(
     Returns:
         Complete Manim code string with class GenScene(Scene)
     """
+    logger.info(f"[LINE_EVOLUTION] ========== GENERATE LINE EVOLUTION STARTED ==========")
+    logger.info(f"[LINE_EVOLUTION] Input parameters | csv_path={csv_path} | theme={theme} | narrative_style={narrative_style}")
+    logger.info(f"[LINE_EVOLUTION] Column overrides | time_col={time_col} | value_col={value_col} | group_col={group_col}")
+
     # Extract configuration from spec
     data_binding = getattr(spec, "data_binding", None)
     timing = getattr(spec, "timing", None)
     style = getattr(spec, "style", None)
     axes_config = getattr(spec, "axes", None)
 
-    value_col = getattr(data_binding, "value_col", None) if data_binding else None
-    time_col = getattr(data_binding, "time_col", None) if data_binding else None
+    logger.debug(f"[LINE_EVOLUTION] Spec extraction | has_data_binding={data_binding is not None} | has_timing={timing is not None} | has_style={style is not None} | has_axes={axes_config is not None}")
+
+    # Use provided columns or fall back to spec data_binding
+    _value_col = value_col or (getattr(data_binding, "value_col", None) if data_binding else None)
+    _time_col = time_col or (getattr(data_binding, "time_col", None) if data_binding else None)
+    _group_col = group_col or (getattr(data_binding, "group_col", None) if data_binding else None)
+
+    logger.info(f"[LINE_EVOLUTION] Resolved columns | time_col={_time_col} | value_col={_value_col} | group_col={_group_col}")
 
     total_time = getattr(timing, "total_time", 12.0) if timing else 12.0
 
@@ -347,12 +346,20 @@ def generate_line_evolution(
     x_label = getattr(axes_config, "x_label", None) if axes_config else None
     y_label = getattr(axes_config, "y_label", None) if axes_config else None
 
+    logger.debug(f"[LINE_EVOLUTION] Axis labels | x_label={x_label} | y_label={y_label} | total_time={total_time}")
+
     # Parse data
-    data = parse_csv_data(
-        csv_path=csv_path,
-        value_col=value_col or "value",
-        time_col=time_col or "time",
-    )
+    logger.info(f"[LINE_EVOLUTION] Starting CSV data parsing...")
+    try:
+        data = parse_csv_data(
+            csv_path=csv_path,
+            value_col=_value_col or "value",
+            time_col=_time_col or "time",
+        )
+        logger.info(f"[LINE_EVOLUTION] CSV parsing successful | data_points={len(data.values)} | time_range={data.times[0] if data.times else 'N/A'} to {data.times[-1] if data.times else 'N/A'} | value_range={data.min_value:.2f} to {data.max_value:.2f}")
+    except Exception as e:
+        logger.error(f"[LINE_EVOLUTION] CSV parsing FAILED | error={str(e)} | error_type={type(e).__name__}")
+        raise
 
     # Detect insights for highlights
     insights = detect_insights(data) if auto_highlights else []
