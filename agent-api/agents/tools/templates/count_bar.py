@@ -35,6 +35,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 
+from agents.tools.templates.csv_utils import read_csv_rows
+
 # Setup module logger
 logger = logging.getLogger("animation_pipeline.templates.count_bar")
 

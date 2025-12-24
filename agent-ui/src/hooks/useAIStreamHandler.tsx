@@ -273,7 +273,10 @@ const useAIChatStreamHandler = () => {
                     userPersisted = true
                     // Persist the user's message once the session_id is known,
                     // then reconcile UI to avoid duplicate unsaved/saved user messages
-                    postUserMessage(userDisplay).then(() => {
+                    postUserMessage(
+                      userDisplay,
+                      chunk.session_id as string
+                    ).then(() => {
                       setMessages((prev) => {
                         const len = prev.length
                         if (len >= 3) {

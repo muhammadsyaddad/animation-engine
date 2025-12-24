@@ -188,7 +188,7 @@ export interface UseChatSession {
   loadMessages: (sessionId?: string) => Promise<UIChatMessage[] | null>
 
   // Message persistence
-  postUserMessage: (content: string) => Promise<boolean>
+  postUserMessage: (content: string, sessionId?: string) => Promise<boolean>
   postAgentMessage: (
     content: string,
     from?: Partial<UIChatMessage>
@@ -416,12 +416,12 @@ export function useChatSession(): UseChatSession {
   )
 
   const postUserMessage = useCallback(
-    async (content: string): Promise<boolean> => {
+    async (content: string, sessionIdOverride?: string): Promise<boolean> => {
       if (!content || !content.trim()) return false
       const endpoint = requireEndpoint()
       if (!endpoint) return false
 
-      const sid = (await ensureSession()) ?? null
+      const sid = sessionIdOvverride ?? (await ensureSession()) ?? null
       if (!sid) return false
 
       try {
