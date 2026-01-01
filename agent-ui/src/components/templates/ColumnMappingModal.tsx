@@ -367,27 +367,28 @@ const ColumnMappingModal: React.FC<ColumnMappingModalProps> = ({
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={onClose}
-      />
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
 
       {/* Modal */}
-      <div className="relative z-10 mx-4 w-full max-w-lg overflow-hidden rounded-xl border border-accent/30 bg-secondary shadow-2xl">
+      <div className="relative z-10 w-full max-w-md overflow-hidden rounded-lg border border-border bg-background shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-accent/20 px-6 py-4">
+        <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold text-primary">
-              Configure Columns
+            <h2 className="text-base font-medium text-primary">
+              {template.display_name}
             </h2>
-            <p className="mt-0.5 text-sm text-muted">{template.display_name}</p>
+            {templateConfig && (
+              <p className="mt-0.5 text-xs text-muted">
+                {templateConfig.description}
+              </p>
+            )}
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-2 transition-colors hover:bg-accent/20"
+            className="rounded p-1.5 text-muted transition-colors hover:bg-secondary hover:text-primary"
             disabled={isLoading}
           >
             <Icon type="x" size="sm" />
@@ -395,108 +396,82 @@ const ColumnMappingModal: React.FC<ColumnMappingModalProps> = ({
         </div>
 
         {/* Content */}
-        <div className="max-h-[60vh] overflow-y-auto px-6 py-4">
-          {/* Template description */}
-          {templateConfig && (
-            <p className="mb-4 border-b border-accent/10 pb-4 text-sm text-muted">
-              {templateConfig.description}
-            </p>
-          )}
-
+        <div className="max-h-[60vh] overflow-y-auto px-5 py-4">
           {/* Dataset info */}
           {datasetSummary && (
-            <div className="mb-4 rounded-lg border border-accent/20 bg-accent/10 px-3 py-2">
-              <div className="flex items-center gap-2 text-xs text-muted">
-                <span className="font-medium text-primary">
-                  {datasetSummary.filename}
-                </span>
-                {datasetSummary.row_count && (
-                  <span>
-                    • {datasetSummary.row_count.toLocaleString()} rows
-                  </span>
-                )}
-                {datasetSummary.column_count && (
-                  <span>• {datasetSummary.column_count} columns</span>
-                )}
-              </div>
+            <div className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
+              <span className="font-medium text-primary/80">
+                {datasetSummary.filename}
+              </span>
+              {datasetSummary.row_count && (
+                <span>{datasetSummary.row_count.toLocaleString()} rows</span>
+              )}
+              {datasetSummary.column_count && (
+                <span>{datasetSummary.column_count} columns</span>
+              )}
             </div>
           )}
 
           {/* Column mappings */}
           {templateConfig ? (
-            <div className="space-y-4">
+            <div className="space-y-3">
               {templateConfig.columns.map((col) => {
                 const candidates = getColumnsForType(col.columnType)
-                const typeLabel =
-                  col.columnType === 'numeric'
-                    ? '(numeric)'
-                    : col.columnType === 'categorical'
-                      ? '(categorical)'
-                      : col.columnType === 'time'
-                        ? '(time)'
-                        : ''
 
                 return (
                   <div key={col.key}>
-                    <label className="mb-1.5 block">
-                      <span className="text-sm font-medium text-primary">
+                    <label className="mb-1 block">
+                      <span className="text-xs font-medium text-primary">
                         {col.label}
-                        {col.required && (
-                          <span className="ml-1 text-red-400">*</span>
+                        {!col.required && (
+                          <span className="ml-1.5 text-muted/60">optional</span>
                         )}
                       </span>
-                      {typeLabel && (
-                        <span className="ml-2 text-xs text-muted">
-                          {typeLabel}
-                        </span>
-                      )}
                     </label>
                     <select
                       value={columnMapping[col.key] || ''}
                       onChange={(e) =>
                         handleColumnChange(col.key, e.target.value)
                       }
-                      className="w-full rounded-lg border border-accent/30 bg-primaryAccent px-3 py-2 text-sm text-primary transition-colors focus:border-primary/50 focus:outline-none"
+                      className="w-full rounded border border-border bg-secondary px-3 py-2 text-sm text-primary transition-colors focus:border-primary/40 focus:outline-none"
                       disabled={isLoading}
                     >
                       <option value="">
-                        {col.required ? 'Select a column...' : '(None)'}
+                        {col.required ? 'Select...' : 'None'}
                       </option>
                       {candidates.map((column) => (
                         <option key={column} value={column}>
                           {column}
-                          {numericColumns.includes(column) && ' 📊'}
-                          {categoricalColumns.includes(column) && ' 🏷️'}
-                          {datasetSummary?.time_column === column && ' 📅'}
                         </option>
                       ))}
                     </select>
-                    <p className="mt-1 text-xs text-muted">{col.description}</p>
+                    <p className="mt-1 text-[11px] text-muted/70">
+                      {col.description}
+                    </p>
                   </div>
                 )
               })}
             </div>
           ) : (
-            <div className="py-8 text-center text-muted">
-              <p>No configuration needed for this template.</p>
-              <p className="mt-1 text-sm">Columns will be auto-detected.</p>
+            <div className="py-6 text-center text-sm text-muted">
+              Columns will be auto-detected.
             </div>
           )}
 
-          {/* Error message */}
+          {/* Error message - subtle, not red */}
           {error && (
-            <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+            <div className="mt-4 rounded border border-border bg-secondary/60 px-3 py-2 text-xs text-muted">
               {error}
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 border-t border-accent/20 bg-primaryAccent/30 px-6 py-4">
+        <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-muted transition-colors hover:bg-accent/20 hover:text-primary"
+            className="rounded px-3 py-1.5 text-sm text-muted transition-colors hover:bg-secondary hover:text-primary"
             disabled={isLoading}
           >
             Cancel
@@ -504,19 +479,16 @@ const ColumnMappingModal: React.FC<ColumnMappingModalProps> = ({
           <button
             type="button"
             onClick={handleConfirm}
-            className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primaryAccent transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-sm font-medium text-primaryAccent transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={isLoading}
           >
             {isLoading ? (
               <>
-                <div className="h-4 w-4 animate-spin rounded-full border-2 border-primaryAccent border-t-transparent" />
+                <div className="h-3 w-3 animate-spin rounded-full border border-primaryAccent border-t-transparent" />
                 <span>Generating...</span>
               </>
             ) : (
-              <>
-                <Icon type="check" size="sm" />
-                <span>Generate Animation</span>
-              </>
+              <span>Generate</span>
             )}
           </button>
         </div>

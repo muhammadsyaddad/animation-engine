@@ -14,6 +14,7 @@ import { toast } from 'sonner'
 import { useQueryState } from 'nuqs'
 import { truncateText } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
+import { IS_DEPLOYMENT, DEPLOY_ENDPOINT } from '@/lib/config'
 
 const ENDPOINT_PLACEHOLDER = 'NO ENDPOINT ADDED'
 const SidebarHeader = () => (
@@ -70,7 +71,16 @@ const Endpoint = () => {
   const [, setSessionId] = useQueryState('session')
 
   useEffect(() => {
-    setEndpointValue(selectedEndpoint)
+    if (IS_DEPLOYMENT && DEPLOY_ENDPOINT) {
+      if (selectedEndpoint !== DEPLOY_ENDPOINT) {
+        setSelectedEndpoint(DEPLOY_ENDPOINT)
+      }
+      // Ini boleh tetap jalan karena local state gak memicu effect ini ulang
+      setEndpointValue(DEPLOY_ENDPOINT)
+      setIsEditing(false)
+    } else {
+      setEndpointValue(selectedEndpoint)
+    }
     setIsMounted(true)
   }, [selectedEndpoint])
 
@@ -264,7 +274,7 @@ const Sidebar = () => {
         />
         {isMounted && (
           <>
-            <Endpoint />
+            {IS_DEPLOYMENT && <Endpoint />}
             {isEndpointActive && (
               <>
                 <motion.div
